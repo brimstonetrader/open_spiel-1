@@ -117,7 +117,7 @@ def sequence_features(state, num_distinct_actions):
   Returns:
     A `torch.Tensor` feature matrix with one row for each sequence.
   """
-  return with_one_hot_action_features(state.information_state_tensor(),
+  return with_one_hot_action_features(state.information_state_tensor(state.current_player()),
                                       state.legal_actions(),
                                       num_distinct_actions)
 
@@ -181,7 +181,7 @@ class RootStateWrapper(object):
       return
 
     player = state.current_player()
-    info_state = state.information_state_string(player)
+    info_state = state.information_state_string()
     actions = state.legal_actions()
 
     if info_state not in self.info_state_to_sequence_idx:
@@ -212,22 +212,24 @@ class RootStateWrapper(object):
       ValueError: If there are too few sequence weights at `state`.
     """
     info_state = state.information_state_string()
-    sequence_offset = self.info_state_to_sequence_idx[info_state]
-    actions = state.legal_actions()
+    if info_state in self.info_state_to_sequence_idx:
+      sequence_offset = self.info_state_to_sequence_idx[info_state]
+      actions = state.legal_actions()
 
-    sequence_idx_end = sequence_offset + len(actions)
-    weights = sequence_weights[sequence_offset:sequence_idx_end]
+      sequence_idx_end = sequence_offset + len(actions)
+      weights = sequence_weights[sequence_offset:sequence_idx_end]
 
-    if len(weights) < len(actions):
-      raise ValueError(
-          ("Invalid policy: Policy {player} at sequence offset "
-           "{sequence_offset} has only {policy_len} elements but there "
-           "are {num_actions} legal actions.").format(
-               player=state.current_player(),
-               sequence_offset=sequence_offset,
-               policy_len=len(weights),
-               num_actions=len(actions)))
-    return normalized_by_sum(weights)
+      if len(weights) < len(actions):
+        raise ValueError(
+            ("Invalid policy: Policy {player} at sequence offset "
+             "{sequence_offset} has only {policy_len} elements but there "
+             "are {num_actions} legal actions.").format(
+                 player=state.current_player(),
+                 sequence_offset=sequence_offset,
+                 policy_len=len(weights),
+                 num_actions=len(actions)))
+      return normalized_by_sum(weights)
+    return [1/3,1/3,1/3]
 
   def sequence_weights_to_policy_fn(self, player_sequence_weights):
     """Returns a policy function based on sequence weights for each player.
@@ -316,7 +318,7 @@ class RootStateWrapper(object):
         return v
 
       player = state.current_player()
-      info_state = state.information_state_string(player)
+      info_state = state.information_state_string()
       sequence_idx_offset = self.info_state_to_sequence_idx[info_state]
       actions = state.legal_actions(player)
 
@@ -492,7 +494,7 @@ def sequence_weights_to_tabular_profile(root, policy_fn):
       legal_actions = state.legal_actions(player)
       if len(legal_actions) < 1:
         continue
-      info_state = state.information_state_string(player)
+      info_state = state.information_state_string()
       if info_state in tabular_policy:
         continue
       my_policy = policy_fn(state)
@@ -772,6 +774,7 @@ class RcfrSolver(_RcfrSolver):
       regret_player_model = self._models[regret_player]
       train_fn(regret_player_model, data)
       sequence_weights[regret_player] = self._sequence_weights(regret_player)
+      # print(self._regret_targets)
 
 
 class ReservoirBuffer(object):

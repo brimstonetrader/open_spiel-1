@@ -1,0 +1,278 @@
+# Drop-in replacement for rl_response.py that computes approximate exploitability
+# of a *given* fixed strategy (loaded from disk) by training RL approximate best responses.
+
+from absl import app
+from absl import flags
+import numpy as np
+import pickle
+
+from open_spiel.python import rl_agent
+from open_spiel.python import rl_environment
+from open_spiel.python import rl_tools
+from open_spiel.python.jax import dqn
+from open_spiel.python.algorithms import tabular_qlearner
+from open_spiel.python.algorithms import random_agent, mccfr_callable
+
+
+FLAGS = flags.FLAGS
+
+# Training parameters
+flags.DEFINE_string("checkpoint_dir", "/tmp/dqn_test",
+                    "Directory to save/load the agent models.")
+flags.DEFINE_integer("save_every", int(1e4),
+                     "Episode frequency at which the DQN agent models are saved.")
+flags.DEFINE_integer("num_train_episodes", int(1e6),
+                     "Number of training episodes.")
+flags.DEFINE_integer("eval_every", 1000,
+                     "Episode frequency at which the DQN agents are evaluated.")
+flags.DEFINE_integer("eval_episodes", 1000,
+                     "How many episodes to run per eval.")
+
+# DQN model hyper-parameters
+flags.DEFINE_list("hidden_layers_sizes", [64, 64, 64],
+                  "Number of hidden units in the Q-Network MLP.")
+flags.DEFINE_integer("replay_buffer_capacity", int(1e5),
+                     "Size of the replay buffer.")
+flags.DEFINE_integer("batch_size", 32,
+                     "Number of transitions to sample at each learning step.")
+
+# Main algorithm parameters
+flags.DEFINE_integer("seed", 0, "Seed to use for everything")
+flags.DEFINE_integer("window_size", 30, "Size of window for rolling average")
+flags.DEFINE_integer("num_players", 2, "Number of players")
+flags.DEFINE_string("game", "leduc_poker", "Game string")
+flags.DEFINE_string("learner", "qlearning", "Learner (qlearning | dqn)")
+
+# NEW: load your fixed strategy/policy from disk
+flags.DEFINE_string(
+    "exploitee_policy_path",
+    "",
+    "Path to a pickled policy object OR dict. "
+    "Supported: open_spiel.python.policy.TabularPolicy-like object with "
+    "action_probabilities(state, player_id), or a dict mapping "
+    "(player_id, info_state_str) -> {action:int_prob}."
+)
+
+# Optional: fallback exploitee if you don't provide a file
+flags.DEFINE_string("fallback_exploitee", "random", "random | none")
+
+
+class PolicyAgent(rl_agent.AbstractAgent):
+  """Plays according to a fixed strategy/policy."""
+  def __init__(self, player_id, num_actions, policy_obj=None, policy_dict=None, rng=None):
+    self._player_id = player_id
+    self._num_actions = num_actions
+    self._policy_obj = policy_obj
+    self._policy_dict = policy_dict
+    self._rng = rng if rng is not None else np.random.RandomState(0)
+
+  def _probs_from_obj(self, state):
+    # Expecting something like TabularPolicy / Policy: action_probabilities(state, player_id)->dict
+    d = self._policy_obj.action_probabilities(state, self._player_id)
+    probs = np.zeros(self._num_actions, dtype=np.float64)
+    for a, p in d.items():
+      probs[a] = float(p)
+    s = probs.sum()
+    if s <= 0:
+      return None
+    return probs / s
+
+  def _probs_from_dict(self, time_step):
+    # Expect keys: (player_id, info_state_str) -> {action: prob}
+    info_state_str = time_step.observations["info_state"][self._player_id]
+    key = (self._player_id, info_state_str)
+    if key not in self._policy_dict:
+      return None
+    d = self._policy_dict[key]
+    probs = np.zeros(self._num_actions, dtype=np.float64)
+    for a, p in d.items():
+      probs[int(a)] = float(p)
+    s = probs.sum()
+    if s <= 0:
+      return None
+    return probs / s
+
+  def step(self, time_step, is_evaluation=False):
+    if time_step.last():
+      return
+
+    legal = time_step.observations["legal_actions"][self._player_id]
+    legal = list(legal)
+
+    probs = None
+    if self._policy_obj is not None:
+      # include_full_state=True makes this available
+      state = time_step.observations.get("state", None)
+      if state is None:
+        raise RuntimeError("Need include_full_state=True to use policy_obj.")
+      probs = self._probs_from_obj(state)
+    elif self._policy_dict is not None:
+      probs = self._probs_from_dict(time_step)
+
+    if probs is None:
+      # Strict behavior: if your policy doesn't define a state, act uniformly over legal actions.
+      probs = np.zeros(self._num_actions, dtype=np.float64)
+      for a in legal:
+        probs[a] = 1.0
+      probs /= probs.sum()
+
+    # Mask to legal, renormalize
+    mask = np.zeros(self._num_actions, dtype=np.float64)
+    mask[legal] = 1.0
+    probs = probs * mask
+    s = probs.sum()
+    if s <= 0:
+      # fallback uniform over legal
+      probs = mask / mask.sum()
+    else:
+      probs /= s
+
+    action = int(self._rng.choice(np.arange(self._num_actions), p=probs))
+    return rl_agent.StepOutput(action=action, probs=probs)
+
+
+def eval_against_fixed_bots(env, trained_agents, fixed_agents, num_episodes):
+  """Evaluates trained_agents against fixed_agents."""
+  num_players = len(fixed_agents)
+  sum_episode_rewards = np.zeros(num_players)
+  for player_pos in range(num_players):
+    cur_agents = fixed_agents[:]
+    cur_agents[player_pos] = trained_agents[player_pos]
+    for _ in range(num_episodes):
+      time_step = env.reset()
+      episode_rewards = 0.0
+      while not time_step.last():
+        player_id = time_step.observations["current_player"]
+        if env.is_turn_based:
+          agent_output = cur_agents[player_id].step(time_step, is_evaluation=True)
+          action_list = [agent_output.action]
+        else:
+          agents_output = [agent.step(time_step, is_evaluation=True) for agent in cur_agents]
+          action_list = [ao.action for ao in agents_output]
+        time_step = env.step(action_list)
+        episode_rewards += float(time_step.rewards[player_pos])
+      sum_episode_rewards[player_pos] += episode_rewards
+  return sum_episode_rewards / float(num_episodes)
+
+
+def create_training_agents(num_players, num_actions, info_state_size, hidden_layers_sizes):
+  if FLAGS.learner == "qlearning":
+    return [
+      tabular_qlearner.QLearner(
+        player_id=idx,
+        num_actions=num_actions,
+        step_size=0.1,
+        epsilon_schedule=rl_tools.LinearSchedule(0.5, 0.2, 1000000),
+        discount_factor=0.99
+      ) for idx in range(num_players)
+    ]
+  if FLAGS.learner == "dqn":
+    return [
+      dqn.DQN(
+        player_id=idx,
+        state_representation_size=info_state_size,
+        num_actions=num_actions,
+        discount_factor=0.99,
+        epsilon_start=0.5,
+        epsilon_end=0.1,
+        hidden_layers_sizes=hidden_layers_sizes,
+        replay_buffer_capacity=FLAGS.replay_buffer_capacity,
+        batch_size=FLAGS.batch_size
+      ) for idx in range(num_players)
+    ]
+  raise RuntimeError("Unknown learner")
+
+
+class RollingAverage(object):
+  def __init__(self, size=100):
+    self._size = size
+    self._values = np.array([0] * self._size, dtype=np.float64)
+    self._index = 0
+    self._total_additions = 0
+
+  def add(self, value):
+    self._values[self._index] = value
+    self._total_additions += 1
+    self._index = (self._index + 1) % self._size
+
+  def mean(self):
+    n = min(self._size, self._total_additions)
+    if n == 0:
+      return 0.0
+    return float(self._values.sum() / n)
+
+
+def _load_exploitee(policy_path):
+  if not policy_path:
+    return None, None
+  with open(policy_path, "rb") as f:
+    obj = pickle.load(f)
+  # Heuristic: policy object has action_probabilities method => treat as Policy-like
+  if hasattr(obj, "action_probabilities") and callable(getattr(obj, "action_probabilities")):
+    return obj, None
+  if isinstance(obj, dict):
+    return None, obj
+  raise RuntimeError(
+    "Unsupported policy file. Provide a pickled Policy-like object with "
+    "action_probabilities(state, player_id) or a dict mapping "
+    "(player_id, info_state_str)->{action:prob}."
+  )
+
+
+def main(_):
+  np.random.seed(FLAGS.seed)
+  rngs = [np.random.RandomState(FLAGS.seed + i + 1) for i in range(FLAGS.num_players)]
+
+  env = rl_environment.Environment(FLAGS.game, include_full_state=True)
+  info_state_size = env.observation_spec()["info_state"][0]
+  num_actions = env.action_spec()["num_actions"]
+  num_players = FLAGS.num_players
+
+  policy_obj, policy_dict = _load_exploitee(FLAGS.exploitee_policy_path)
+
+  if policy_obj is not None or policy_dict is not None:
+    exploitee_agents = [
+      PolicyAgent(i, num_actions, policy_obj=policy_obj, policy_dict=policy_dict, rng=rngs[i])
+      for i in range(num_players)
+    ]
+  else:
+    if FLAGS.fallback_exploitee == "random":
+      exploitee_agents = [
+        random_agent.RandomAgent(player_id=i, num_actions=num_actions)
+        for i in range(num_players)
+      ]
+    else:
+      raise RuntimeError("No exploitee_policy_path provided and fallback_exploitee=none")
+
+  hidden_layers_sizes = [int(x) for x in FLAGS.hidden_layers_sizes]
+  learning_agents = create_training_agents(num_players, num_actions, info_state_size, hidden_layers_sizes)
+
+  rolling_averager = RollingAverage(FLAGS.window_size)
+
+  print("Training approximate best responses against fixed strategy...")
+
+  for ep in range(FLAGS.num_train_episodes):
+    if (ep + 1) % FLAGS.eval_every == 0:
+      r_mean = eval_against_fixed_bots(env, learning_agents, exploitee_agents, FLAGS.eval_episodes)
+      # For 2-player zero-sum this estimates exploitability: BR_0(sigma_1)+BR_1(sigma_0)
+      expl = float(r_mean.sum())
+      rolling_averager.add(expl)
+      print(f"[{ep+1}] BR payoffs per seat: {r_mean}, approx exploitability: {expl}, "
+            f"rolling({FLAGS.window_size}): {rolling_averager.mean()}")
+
+    agents_round1 = [learning_agents[0], exploitee_agents[1]]
+    agents_round2 = [exploitee_agents[0], learning_agents[1]]
+
+    for agents in (agents_round1, agents_round2):
+      time_step = env.reset()
+      while not time_step.last():
+        player_id = time_step.observations["current_player"]
+        agent_output = agents[player_id].step(time_step)
+        time_step = env.step([agent_output.action])
+
+      for agent in agents:
+        agent.step(time_step)
+
+
+if __name__ == "__main__":
+  app.run(main)

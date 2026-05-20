@@ -1,0 +1,25 @@
+# mccfr_agent.py
+import numpy as np
+import pyspiel
+from open_spiel.python import rl_agent
+from open_spiel.python.algorithms import outcome_sampling
+
+class MCCFRAgent(rl_agent.AbstractAgent):
+  def __init__(self, game_name, player_id, num_actions, iters=10000, seed=0):
+    super().__init__(player_id=player_id, name="mccfr")
+    game = pyspiel.load_game(game_name)
+    self._num_actions = num_actions
+    self._rng = np.random.RandomState(seed + player_id)
+    self._solver = outcome_sampling.OutcomeSamplingSolver(game)
+    for _ in range(iters): self._solver.iteration()
+    self._policy = self._solver.average_policy()
+
+  def step(self, time_step, is_evaluation=False):
+    if time_step.last(): return
+    state = time_step.observations["state"]  # requires include_full_state=True
+    d = self._policy.action_probabilities(state, self.player_id)
+    probs = np.zeros(self._num_actions); 
+    for a,p in d.items(): probs[a] = p
+    probs /= probs.sum()
+    a = int(self._rng.choice(np.arange(self._num_actions), p=probs))
+    return rl_agent.StepOutput(action=a, probs=probs)

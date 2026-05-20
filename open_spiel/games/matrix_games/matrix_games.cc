@@ -109,8 +109,8 @@ const GameType kGameType{
 std::shared_ptr<const Game> Factory(const GameParameters& params) {
   return std::shared_ptr<const Game>(new MatrixGame(
       kGameType, params, {"Rock", "Paper", "Scissors"},
-      {"Rock", "Paper", "Scissors"}, {0, -25, 50, 25, 0, -5, -50, 5, 0},
-      {0, 25, -50, -25, 0, 5, 50, -5, 0}));
+      {"Rock", "Paper", "Scissors"}, {0, -1, 3, 1, -1, -3, -1, 1, 0},
+      {0, 1, -3, -1, 1, 3, 3, -3, 0}));
 }
 
 REGISTER_SPIEL_GAME(kGameType, Factory);

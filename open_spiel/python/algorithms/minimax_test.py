@@ -32,8 +32,7 @@ class MinimaxTest(absltest.TestCase):
     # We only check it runs
     tic_tac_toe = pyspiel.load_game("tic_tac_toe")
 
-    game_score, _ = minimax.alpha_beta_search(
-        tic_tac_toe, value_function=lambda x: 0, maximum_depth=1)
+    game_score, _ = minimax.alpha_beta_search(tic_tac_toe, value_function=lambda x: 0, maximum_depth=1)
     self.assertEqual(0., game_score)
 
   def test_win(self):

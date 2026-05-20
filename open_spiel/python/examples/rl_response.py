@@ -22,12 +22,14 @@ directly rather than RL+Search.
 from absl import app
 from absl import flags
 import numpy as np
+import pyspiel
 
 from open_spiel.python import rl_agent
 from open_spiel.python import rl_environment
 from open_spiel.python import rl_tools
-from open_spiel.python.algorithms import random_agent
-from open_spiel.python.algorithms import tabular_qlearner
+from open_spiel.python.algorithms import random_agent, tabular_qlearner, exploitability
+from open_spiel.python.algorithms.mccfr_callable import MCCFRAgent
+from open_spiel.python.algorithms.rwywe_callable import RWYWECallableAgent
 from open_spiel.python.jax import dqn
 
 FLAGS = flags.FLAGS
@@ -190,6 +192,15 @@ def main(_):
         # FirstActionAgent(player_id=idx, num_actions=num_actions)
         for idx in range(num_players)
     ]
+  elif FLAGS.exploitee == "mccfr":
+    exploitee_agents = [
+        MCCFRAgent(FLAGS.game, idx, num_actions, iters=2000) for idx in range(num_players)    ]
+  elif FLAGS.exploitee == "rwywe":
+    agent = [RWYWECallableAgent(FLAGS.game, idx, num_actions, seed=FLAGS.seed)
+            for idx in range(num_players)]
+    print(exploitability.nash_conv(pyspiel.load_game(FLAGS.game), agent[-1]._policy))
+    exploitee_agents = [RWYWECallableAgent(FLAGS.game, idx, num_actions, seed=FLAGS.seed)
+                        for idx in range(num_players)]  
   else:
     raise RuntimeError("Unknown exploitee")
 
