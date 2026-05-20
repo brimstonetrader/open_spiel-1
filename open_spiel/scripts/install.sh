@@ -17,6 +17,8 @@
 # The following should be easy to setup as a submodule:
 # https://git-scm.com/docs/git-submodule
 
+export OPEN_SPIEL_ABSL_VERSION=${OPEN_SPIEL_ABSL_VERSION:-"20250814.1"}
+
 die() {
   echo "$*" 1>&2
   exit 1
@@ -77,7 +79,7 @@ DOWNLOAD_CACHE_DIR=${DOWNLOAD_CACHE_DIR:-$DEFAULT_DOWNLOAD_CACHE_DIR}
 # Create the cache directory.
 [[ -d "${DOWNLOAD_CACHE_DIR}" ]] || mkdir "${DOWNLOAD_CACHE_DIR}"
 
-# 1. Clone the external dependencies before installing systen packages, to make
+# 1. Clone the external dependencies before installing system packages, to make
 # sure they are present even if later commands fail.
 #
 # We do not use submodules because the CL versions are stored within Git
@@ -131,7 +133,23 @@ fi
 
 DIR="open_spiel/abseil-cpp"
 if [[ ! -d ${DIR} ]]; then
-  cached_clone -b '20230125.0' --single-branch --depth 1 https://github.com/abseil/abseil-cpp.git ${DIR}
+  cached_clone -b "${OPEN_SPIEL_ABSL_VERSION}" --single-branch --depth 1 https://github.com/abseil/abseil-cpp.git ${DIR}
+fi
+
+DIR="open_spiel/json"
+if [[ ! -d ${DIR} ]]; then
+  cached_clone -b 'master' https://github.com/nlohmann/json.git ${DIR}
+  pushd ${DIR}
+  git checkout '9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03'
+  popd
+fi
+
+DIR="open_spiel/pybind11_json"
+if [[ ! -d ${DIR} ]]; then
+  cached_clone -b 'master' https://github.com/pybind/pybind11_json.git ${DIR}
+  pushd ${DIR}
+  git checkout 'd0bf434be9d287d73a963ff28745542daf02c08f'
+  popd
 fi
 
 DIR="open_spiel/pybind11_abseil"
@@ -269,12 +287,13 @@ if [[ "$OSTYPE" == "linux-gnu" ]]; then
     EXT_DEPS="${EXT_DEPS} rustc cargo"
   fi
 
-  APT_GET=`which apt-get`
-  if [ "$APT_GET" = "" ]
+  if command -v apt-get &> /dev/null
   then
-     echo "This script assumes a Debian-based Linux distribution. Please install these packages manually or using your distribution's package manager:"
-     echo "$EXT_DEPS"
-     exit 1
+      APT_GET=$(command -v apt-get)
+  else
+    echo "This script assumes a Debian-based Linux distribution. Please install these packages manually or using your distribution's package manager:"
+    echo "$EXT_DEPS"
+    exit 1
   fi
 
   # We install the packages only if they are not present yet.

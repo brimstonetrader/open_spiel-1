@@ -39,16 +39,25 @@
 //  "num_suits"       int    num suits in deck             (default = 4)
 //  "hand_size"       int    num cards in player hand      (default = 10)
 
+#include <array>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "open_spiel/abseil-cpp/absl/types/span.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
+#include "open_spiel/abseil-cpp/absl/strings/string_view.h"
 #include "open_spiel/abseil-cpp/absl/types/optional.h"
 #include "open_spiel/algorithms/observation_history.h"
+#include "open_spiel/game_parameters.h"
 #include "open_spiel/games/gin_rummy/gin_rummy_utils.h"
 #include "open_spiel/observer.h"
 #include "open_spiel/spiel.h"
+#include "open_spiel/spiel_globals.h"
+#include "open_spiel/spiel_utils.h"
 
 namespace open_spiel {
 namespace gin_rummy {
@@ -65,6 +74,14 @@ inline constexpr int kWallStockSize = 2;
 inline constexpr int kDefaultKnockCard = 10;
 inline constexpr int kDefaultGinBonus = 25;
 inline constexpr int kDefaultUndercutBonus = 25;
+// There are no explicit game rules that prevent infinite action sequences. Both
+// players can keep drawing the upcard and discarding indefinitely (note that
+// it does not have to be the same card each time, players can cycle through all
+// of the cards in their hands). Of course, this is very poor strategy and never
+// occurs in actual play where it is rare for even three upcards to be drawn in
+// succession. To ensure the game is finite while not prematurely declaring a
+// draw, we set an upper bound well above what would ever occur in actual play.
+inline constexpr int kMaxGameLength = 300;
 // Action constants
 // {0, ..., 51} are reserved for card-specific deal and discard actions
 // corresponding to a standard deck size.
@@ -97,6 +114,52 @@ enum class Phase {
   kGameOver
 };
 
+struct GinRummyStructContents {
+  std::string phase;
+  std::string current_player;
+  int knock_card;
+  std::optional<std::string> upcard;
+  std::optional<std::string> prev_upcard;
+  int stock_size;
+  std::vector<std::vector<std::string>> hands;
+  std::vector<std::string> discard_pile;
+  std::vector<int> deadwood;
+  std::vector<bool> knocked;
+  std::vector<bool> pass_on_first_upcard;
+  std::vector<std::vector<std::vector<std::string>>> layed_melds;
+  std::vector<std::string> layoffs;
+  bool finished_layoffs;
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE(GinRummyStructContents, phase, current_player,
+                                 knock_card, upcard, prev_upcard, stock_size,
+                                 hands, discard_pile, deadwood, knocked,
+                                 pass_on_first_upcard, layed_melds, layoffs,
+                                 finished_layoffs);
+};
+
+struct GinRummyStateStruct : StateStruct, GinRummyStructContents {
+  GinRummyStateStruct() = default;
+  explicit GinRummyStateStruct(const std::string& json_str) {
+    nlohmann::json::parse(json_str).get_to(*this);
+  }
+
+  nlohmann::json to_json_base() const override { return *this; }
+};
+
+struct GinRummyObservationStruct : ObservationStruct, GinRummyStructContents {
+  GinRummyObservationStruct() = default;
+  explicit GinRummyObservationStruct(const std::string& json_str) {
+    nlohmann::json data = nlohmann::json::parse(json_str);
+    data.get_to(static_cast<GinRummyStructContents&>(*this));
+    observing_player = data.value("observing_player", -1);
+  }
+  nlohmann::json to_json_base() const override {
+    nlohmann::json j = static_cast<const GinRummyStructContents&>(*this);
+    j["observing_player"] = observing_player;
+    return j;
+  }
+  int observing_player = -1;
+};
+
 class GinRummyGame;
 class GinRummyObserver;
 
@@ -117,13 +180,21 @@ class GinRummyState : public State {
   std::unique_ptr<State> Clone() const override;
   std::vector<Action> LegalActions() const override;
   std::vector<std::pair<Action, double>> ChanceOutcomes() const override;
+  std::unique_ptr<State> ResampleFromInfostate(
+      int player_id, std::function<double()> rng) const override;
+  std::unique_ptr<StateStruct> ToStruct() const override;
+  std::unique_ptr<ObservationStruct> ToObservationStruct(
+      Player player) const override;
 
   // Used for Python bindings.
   Phase CurrentPhase() const { return phase_; }
   bool FinishedLayoffs() const { return finished_layoffs_ ; }
   absl::optional<int> Upcard() const { return upcard_; }
+  absl::optional<int> PrevUpcard() const { return prev_upcard_; }
+  absl::optional<int> KnockCard() const { return knock_card_; }
   int StockSize() const { return stock_size_; }
   std::vector<std::vector<int>> Hands() const { return hands_; }
+  std::vector<std::vector<int>> KnownCards() const;
   std::vector<int> DiscardPile() const { return discard_pile_; }
   std::vector<int> Deadwood() const { return deadwood_; }
   std::vector<bool> Knocked() const { return knocked_; }
@@ -194,6 +265,8 @@ class GinRummyState : public State {
   // Each player's hand. Indexed by pid.
   std::vector<std::vector<int>> hands_ =
       std::vector<std::vector<int>>(kNumPlayers, std::vector<int>());
+  std::vector<std::vector<bool>> known_cards_ = std::vector<std::vector<bool>>(
+      kNumPlayers, std::vector<bool>(kDefaultNumCards, false));
   // True if the card is still in the deck. Cards from 0-51 using the suit order
   // "scdh".
   std::vector<bool> deck_{};
@@ -216,7 +289,7 @@ class GinRummyState : public State {
       std::vector<std::vector<int>>(kNumPlayers, std::vector<int>());
   // Cards that have been layed off onto knocking player's layed melds.
   std::vector<int> layoffs_{};
-  // cached ActionObservationHistory for each player
+  // Cached ActionObservationHistory for each player.
   std::vector<open_spiel::ActionObservationHistory> aohs_;
 };
 
@@ -244,7 +317,7 @@ class GinRummyGame : public Game {
     return {kObservationTensorSize};
   }
   // All games should terminate before reaching this upper bound.
-  int MaxGameLength() const override { return 300; }
+  int MaxGameLength() const override { return kMaxGameLength; }
   // Chance nodes occur on the deal and when drawing from the stock.
   int MaxChanceNodesInHistory() const override {
     return num_ranks_ * num_suits_ - kWallStockSize;

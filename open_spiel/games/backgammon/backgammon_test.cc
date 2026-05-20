@@ -15,9 +15,17 @@
 #include "open_spiel/games/backgammon/backgammon.h"
 
 #include <algorithm>
+#include <iostream>
+#include <memory>
 #include <random>
+#include <string>
+#include <vector>
 
+#include "open_spiel/abseil-cpp/absl/strings/str_cat.h"
+#include "open_spiel/game_parameters.h"
 #include "open_spiel/spiel.h"
+#include "open_spiel/spiel_utils.h"
+#include "open_spiel/utils/init.h"
 #include "open_spiel/tests/basic_tests.h"
 
 namespace open_spiel {
@@ -61,6 +69,18 @@ void CheckHits(const State &state) {
       // any difference for what we're checking.
     }
   }
+}
+
+void CheckNumTurnsLt10(const State &state) {
+  const BackgammonState &bstate = down_cast<const BackgammonState &>(state);
+  SPIEL_CHECK_LE(bstate.player_turns(), 20);
+}
+
+
+void BasicBackgammonTestsMaxTurns() {
+  std::shared_ptr<const Game> game = LoadGame(
+      "backgammon(max_player_turns=20)");
+  testing::RandomSimTest(*game, 10, true, true, &CheckNumTurnsLt10);
 }
 
 void BasicBackgammonTestsCheckHits() {
@@ -428,7 +448,7 @@ void HumanReadableNotation() {
   std::cout << notation << std::endl;
   SPIEL_CHECK_EQ(notation, absl::StrCat(legal_actions[0], " - 2/Off 1/Off"));
 
-  // Check die order doesnt impact narrative
+  // Check die order doesn't impact narrative
   bstate->SetState(
       kXPlayerId, false, {1, 2}, {0, 0}, {13, 5},
       {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1},
@@ -586,8 +606,10 @@ void BasicHyperBackgammonTest() {
 }  // namespace open_spiel
 
 int main(int argc, char** argv) {
+  open_spiel::Init(argv[0], &argc, &argv, true);
   open_spiel::testing::LoadGameTest("backgammon");
   open_spiel::backgammon::BasicBackgammonTestsCheckHits();
+  open_spiel::backgammon::BasicBackgammonTestsMaxTurns();
   open_spiel::backgammon::BasicBackgammonTestsDoNotStartWithDoubles();
   open_spiel::backgammon::BasicBackgammonTestsVaryScoring();
   open_spiel::backgammon::BasicHyperBackgammonTestsVaryScoring();

@@ -16,11 +16,17 @@
 #define OPEN_SPIEL_GAMES_TIC_TAC_TOE_H_
 
 #include <array>
-#include <map>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <vector>
 
+#include "open_spiel/abseil-cpp/absl/types/optional.h"
+#include "open_spiel/abseil-cpp/absl/types/span.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
+#include "open_spiel/game_parameters.h"
+#include "open_spiel/spiel_globals.h"
+#include "open_spiel/spiel_utils.h"
 #include "open_spiel/spiel.h"
 
 // Simple game of Noughts and Crosses:
@@ -48,10 +54,32 @@ enum class CellState {
   kCross,   // X
 };
 
+
+struct TicTacToeStructContents {
+  std::string current_player;
+  std::vector<std::string> board;
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE(TicTacToeStructContents, current_player,
+                                 board);
+};
+
+// State and Observation structs using SPIEL_DEFINE_STRUCT macro
+SPIEL_DEFINE_STRUCT(TicTacToeStateStruct, StateStruct, TicTacToeStructContents);
+SPIEL_DEFINE_STRUCT(TicTacToeObservationStruct, ObservationStruct,
+                    TicTacToeStructContents);
+
+// Action struct using SPIEL_STRUCT_BOILERPLATE macro
+struct TicTacToeActionStruct : public ActionStruct {
+  int row;
+  int col;
+  SPIEL_STRUCT_BOILERPLATE(TicTacToeActionStruct, row, col);
+};
+
 // State of an in-play game.
 class TicTacToeState : public State {
  public:
   TicTacToeState(std::shared_ptr<const Game> game);
+  TicTacToeState(std::shared_ptr<const Game> game,
+                 const TicTacToeStateStruct& state_struct);
 
   TicTacToeState(const TicTacToeState&) = default;
   TicTacToeState& operator=(const TicTacToeState&) = default;
@@ -81,6 +109,14 @@ class TicTacToeState : public State {
   // Only used by Ultimate Tic-Tac-Toe.
   void SetCurrentPlayer(Player player) { current_player_ = player; }
 
+  std::unique_ptr<StateStruct> ToStruct() const override;
+  std::unique_ptr<ObservationStruct> ToObservationStruct(
+      Player player) const override;
+  std::unique_ptr<ActionStruct> ActionToStruct(
+      Player player, Action action_id) const override;
+  std::vector<Action> StructToActions(
+      const ActionStruct& action_struct) const override;
+
  protected:
   std::array<CellState, kNumCells> board_;
   void DoApplyAction(Action move) override;
@@ -98,8 +134,18 @@ class TicTacToeGame : public Game {
  public:
   explicit TicTacToeGame(const GameParameters& params);
   int NumDistinctActions() const override { return kNumCells; }
+  using Game::NewInitialState;
   std::unique_ptr<State> NewInitialState() const override {
     return std::unique_ptr<State>(new TicTacToeState(shared_from_this()));
+  }
+  std::unique_ptr<State> NewInitialState(
+      const TicTacToeStateStruct& state_struct) const {
+    return std::unique_ptr<State>(
+        new TicTacToeState(shared_from_this(), state_struct));
+  }
+  std::unique_ptr<State> NewInitialState(
+      const nlohmann::json& json) const override {
+    return NewInitialState(TicTacToeStateStruct(json));
   }
   int NumPlayers() const override { return kNumPlayers; }
   double MinUtility() const override { return -1; }

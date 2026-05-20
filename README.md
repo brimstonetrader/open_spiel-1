@@ -1,8 +1,15 @@
 
+<!-- disableFinding(IMAGE_ALT_TEXT_INACCESSIBLE) -->
+<!-- disableFinding(HEADING_REPEAT_H1) -->
+<!-- disableFinding(SNIPPET_INVALID_LANGUAGE) -->
+<!-- disableFinding("github") -->
+<!-- disableFinding(LINK_CL_HEAD) -->
+
 # OpenSpiel: A Framework for Reinforcement Learning in Games
 
 [![Documentation Status](https://readthedocs.org/projects/openspiel/badge/?version=latest)](https://openspiel.readthedocs.io/en/latest/?badge=latest)
 ![build_and_test](https://github.com/deepmind/open_spiel/workflows/build_and_test/badge.svg)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org)
 
 OpenSpiel is a collection of environments and algorithms for research in general
 reinforcement learning and search/planning in games. OpenSpiel supports n-player
@@ -25,7 +32,8 @@ To try OpenSpiel in Google Colaboratory, please refer to `open_spiel/colabs` sub
 
 Please choose among the following options:
 
-*   [Installing OpenSpiel](docs/install.md)
+*   [Installing OpenSpiel](docs/install.md) (for Linux and MacOS; see separate
+    [Windows Installation](docs/windows.md) instructions.)
 *   [Introduction to OpenSpiel](docs/intro.md)
 *   [API Overview and First Example](docs/concepts.md)
 *   [API Reference](docs/api_reference.md)

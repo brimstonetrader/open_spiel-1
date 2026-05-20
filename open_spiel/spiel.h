@@ -28,12 +28,22 @@
 #include "open_spiel/abseil-cpp/absl/synchronization/mutex.h"
 #include "open_spiel/abseil-cpp/absl/types/optional.h"
 #include "open_spiel/abseil-cpp/absl/types/span.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
+#include "open_spiel/utils/nlohmann_json.h"  // IWYU pragma: keep
+#include "open_spiel/utils/status.h"
 #include "open_spiel/game_parameters.h"
 #include "open_spiel/observer.h"
 #include "open_spiel/spiel_globals.h"
 #include "open_spiel/spiel_utils.h"
 
 namespace open_spiel {
+
+constexpr const int kSerializationVersion = 1;
+constexpr const char* kSerializeMetaSectionHeader = "[Meta]";
+constexpr const char* kSerializeGameSectionHeader = "[Game]";
+constexpr const char* kSerializeGameRNGStateSectionHeader = "[GameRNGState]";
+constexpr const char* kSerializeStateSectionHeader = "[State]";
+constexpr const char* kSerializeStartingState = "starting_state=";
 
 // Static information for a game. This will determine what algorithms are
 // applicable. For example, minimax search is only applicable to two-player,
@@ -208,6 +218,56 @@ using HistoryDistribution =
 class Game;
 class Observer;
 
+// Structured information about a game.
+// Added to the API as part of Open Spiel 2.0:
+// https://github.com/google-deepmind/open_spiel/issues/1340.
+// The SpielStruct makes explicit and provides an easy interface to the
+// information encoded in the state, observation, and action strings.
+struct SpielStruct {
+  virtual ~SpielStruct() = default;
+  SpielStruct() = default;
+
+  std::string ToJson() const { return to_json_base().dump(); }
+
+  virtual nlohmann::json to_json_base() const = 0;
+};
+
+// Structured information specifying the state of a game.
+// Accessible via the State::ToStruct and State::ToJson methods.
+struct StateStruct : public SpielStruct {};
+
+// Structured information specifying an observation of the game state for a
+// particular player in imperfect information games.
+// Accessible via the State::ToObservationStruct method.
+struct ObservationStruct : public SpielStruct {};
+
+// Structured information specifying an action for a player in a game.
+struct ActionStruct : public SpielStruct {};
+
+// Structured information specifying the parameters used to configure a game.
+// This struct pattern allows for JSON-based game configuration while
+// maintaining backward compatibility with the GameParameters map API.
+// The game_name field is required and identifies which game this configures.
+// All parameter structs should set game_name in their default constructor.
+struct GameParametersStruct : public SpielStruct {
+  std::string game_name;  // Required: identifies which game this configures
+
+  // Default implementation serializes game_name.
+  // Derived classes should use SPIEL_STRUCT_FIELDS which handles this.
+  nlohmann::json to_json_base() const override {
+    return nlohmann::json{{"game_name", game_name}};
+  }
+};
+
+// SafeActionCast: Helper template to safely cast ActionStruct to a specific
+// type with automatic error checking.
+template <typename ActionStructType>
+const ActionStructType* SafeActionCast(const ActionStruct& action_struct) {
+  const auto* result = dynamic_cast<const ActionStructType*>(&action_struct);
+  SPIEL_CHECK_TRUE(result != nullptr);
+  return result;
+}
+
 // An abstract class that represents a state of the game.
 class State {
  public:
@@ -236,13 +296,23 @@ class State {
   // In the case of chance nodes, the behavior of this function depends on
   // GameType::chance_mode. If kExplicit, then the outcome should be
   // directly applied. If kSampled, then a dummy outcome is passed and the
-  // sampling of and outcome should be done in this function and then applied.
+  // sampling of an outcome should be done in this function and then applied.
   //
   // Games should implement DoApplyAction.
   virtual void ApplyAction(Action action_id);
 
   // Helper versions of ApplyAction that first does a legality check.
   virtual void ApplyActionWithLegalityCheck(Action action_id);
+
+  // Validates an action struct without applying it. Returns OkStatus
+  // if valid, or an error status if invalid. Does not mutate state.
+  virtual Status ValidateActionStruct(
+      const ActionStruct& action_struct) const;
+
+  // Applies an action in its structured format. Validates first, then applies
+  // if valid. Returns OkStatus on success, or an error status if the
+  // action was invalid (in which case state is unchanged).
+  virtual Status ApplyActionStruct(const ActionStruct& action_struct);
 
   // `LegalActions(Player player)` is valid for all nodes in all games,
   // returning an empty list for players who don't act at this state. The
@@ -307,6 +377,37 @@ class State {
     return StringToAction(CurrentPlayer(), action_str);
   }
 
+  // Converts an action to a structured format.
+  virtual std::unique_ptr<ActionStruct> ActionToStruct(
+      Player player, Action action_id) const {
+    SpielFatalError("ActionToStruct not implemented.");
+  }
+  std::unique_ptr<ActionStruct> ActionToStruct(Action action_id) const {
+    return ActionToStruct(CurrentPlayer(), action_id);
+  }
+
+  // Converts an ActionStruct to a vector of actions. Games should override
+  // this method. Most games return a single action, but some games may return
+  // multiple (e.g., Hearts pass phase where one struct maps to 3 card actions).
+  virtual std::vector<Action> StructToActions(
+      const ActionStruct& action_struct) const {
+    SpielFatalError("StructToActions not implemented.");
+  }
+
+  // Converts multiple actions to a single ActionStruct. This is useful for
+  // multi-action sequences (e.g., passing 3 cards in Hearts).
+  // Default implementation requires exactly one action and delegates to
+  // ActionToStruct.
+  virtual std::unique_ptr<ActionStruct> ActionsToStruct(
+      Player player, absl::Span<const Action> actions) const {
+    SPIEL_CHECK_EQ(actions.size(), 1);
+    return ActionToStruct(player, actions[0]);
+  }
+  std::unique_ptr<ActionStruct> ActionsToStruct(
+      absl::Span<const Action> actions) const {
+    return ActionsToStruct(CurrentPlayer(), actions);
+  }
+
   // Returns a string representation of the state. Also used as in the default
   // implementation of operator==.
   virtual std::string ToString() const = 0;
@@ -321,6 +422,17 @@ class State {
     return ToString() == other.ToString();
   }
 
+  // Returns a StateStruct representation of the state.
+  virtual std::unique_ptr<StateStruct> ToStruct() const {
+    SpielFatalError("ToStruct is not implemented.");
+    return nullptr;
+  }
+
+  // Returns a JSON string representation of the state.
+  std::string ToJson() const {
+    return ToStruct()->ToJson();
+  }
+
   // Is this a terminal state? (i.e. has the game ended?)
   virtual bool IsTerminal() const = 0;
 
@@ -330,17 +442,15 @@ class State {
   // implemented. The default is to return 0 except at terminal states, where
   // the terminal returns are returned.
   //
-  // Note 1: should not be called at chance nodes (undefined and crashes).
-  // Note 2: This must agree with Returns(). That is, for any state S_t,
-  //         Returns(St) = Sum(Rewards(S_0), Rewards(S_1)... Rewards(S_t)).
-  //         The default implementation is only correct for games that only
-  //         have a final reward. Games with intermediate rewards must override
-  //         both this method and Returns().
+  // Note: This must agree with Returns(). That is, for any state S_t,
+  //       Returns(St) = Sum(Rewards(S_0), Rewards(S_1)... Rewards(S_t)).
+  //       The default implementation is only correct for games that only
+  //       have a final reward. Games with intermediate rewards must override
+  //       both this method and Returns().
   virtual std::vector<double> Rewards() const {
     if (IsTerminal()) {
       return Returns();
     } else {
-      SPIEL_CHECK_FALSE(IsChanceNode());
       return std::vector<double>(num_players_, 0.0);
     }
   }
@@ -423,7 +533,7 @@ class State {
   std::string HistoryString() const { return absl::StrJoin(History(), ", "); }
 
   // Return how many moves have been done so far in the game.
-  // When players make simultaneous moves, this counts only as a one move.
+  // When players make simultaneous moves, this counts only as a single move.
   // Chance transitions count also as one move.
   // Note that game transformations are not required to preserve the move
   // number in the transformed game.
@@ -431,6 +541,11 @@ class State {
 
   // Is this a first state in the game, i.e. the initial state (root node)?
   bool IsInitialState() const { return history_.empty(); }
+
+  // Is this a first non-chance node in the game, i.e. the first decision or
+  // simultaneous move node (or terminal). Note: only works with
+  // ChanceMode::kExplicitStochastic.
+  bool IsInitialNonChanceState() const;
 
   // For imperfect information games. Returns an identifier for the current
   // information state for the specified player.
@@ -475,7 +590,7 @@ class State {
   // For details, see Section 3.1 of https://arxiv.org/abs/1908.09453
   // or Section 2.1 of https://arxiv.org/abs/1906.11110
 
-  // There are currently no use-case for calling this function with
+  // There are currently no use-cases for calling this function with
   // `kChancePlayerId`. Thus, games are expected to raise an error in those
   // cases using (and it's tested in api_test.py). Use this:
   //   SPIEL_CHECK_GE(player, 0);
@@ -497,7 +612,7 @@ class State {
   // this is required in some applications (e.g. final observation in an RL
   // environment).
   //
-  // There are currently no use-case for calling this function with
+  // There are currently no use-cases for calling this function with
   // `kChancePlayerId`. Thus, games are expected to raise an error in those
   // cases.
   //
@@ -546,7 +661,12 @@ class State {
     return ObservationString(CurrentPlayer());
   }
 
-  // Returns the view of the game, preferably from `player`'s perspective.
+  // Returns player's of view of the game in a vector form.
+  //
+  // Note that while it is not strictly required, most perfect information
+  // games have player-independent observation tensors, and in some cases an
+  // "egocentric" flag can be passed to the game for observation tensors to be
+  // player-relative.
   //
   // Implementations should start with (and it's tested in api_test.py):
   //   SPIEL_CHECK_GE(player, 0);
@@ -560,6 +680,19 @@ class State {
     return ObservationTensor(CurrentPlayer());
   }
   void ObservationTensor(Player player, std::vector<float>* values) const;
+
+  // Returns a structured representation of an observation for `player`.
+  //
+  // Implementations should start with (and it's tested in api_test.py):
+  //   SPIEL_CHECK_GE(player, 0);
+  //   SPIEL_CHECK_LT(player, num_players_);
+  virtual std::unique_ptr<ObservationStruct> ToObservationStruct(
+      Player player) const {
+    SpielFatalError("ToObservationStruct not implemented!");
+  }
+  std::unique_ptr<ObservationStruct> ToObservationStruct() const {
+    return ToObservationStruct(CurrentPlayer());
+  }
 
   // Return a copy of this state.
   virtual std::unique_ptr<State> Clone() const = 0;
@@ -647,8 +780,8 @@ class State {
   virtual std::string Serialize() const;
 
   // Resamples a new history from the information state from player_id's view.
-  // This resamples a private for the other players, but holds player_id's
-  // privates constant, and the public information constant.
+  // This resamples a private history for the other players, but holds
+  // player_id's privates constant, and the public information constant.
   // The privates are sampled uniformly at each chance node. For games with
   // partially-revealed actions that require some policy, we sample uniformly
   // from the list of actions that are consistent with what player_id observed.
@@ -716,6 +849,9 @@ class State {
   // should override this function.
   virtual int MeanFieldPopulation() const;
 
+  std::unique_ptr<State> StartingState() const;
+  std::string StartingStateStr() const { return starting_state_str_; }
+
  protected:
   // See ApplyAction.
   virtual void DoApplyAction(Action action_id) {
@@ -735,6 +871,9 @@ class State {
   // Information that changes over the course of the game.
   std::vector<PlayerAction> history_;
   int move_number_;
+
+  // Optional json-serialized starting state that the history originates from.
+  std::string starting_state_str_;
 };
 
 std::ostream& operator<<(std::ostream& stream, const State& state);
@@ -767,10 +906,21 @@ class Game : public std::enable_shared_from_this<Game> {
   // Returns a newly allocated initial state.
   virtual std::unique_ptr<State> NewInitialState() const = 0;
 
-  // Return a new state from a string description. This is an unspecified and
-  // unrestricted function to construct a new state from a string.
+  // Return a new state from a string description. Defaults to interpreting the
+  // string as json.
   virtual std::unique_ptr<State> NewInitialState(const std::string& str) const {
-    SpielFatalError("NewInitialState from string is not implemented.");
+    return NewInitialState(nlohmann::json::parse(str));
+  }
+
+  // Overload for string literals to resolve ambiguity with nlohmann::json.
+  std::unique_ptr<State> NewInitialState(const char* str) const {
+    return NewInitialState(std::string(str));
+  }
+
+  // Return a new state from json.
+  virtual std::unique_ptr<State> NewInitialState(
+      const nlohmann::json& json) const {
+    SpielFatalError("NewInitialState from state json is not implemented.");
   }
 
   // Returns newly allocated initial states. In most cases, this will be a
@@ -788,7 +938,7 @@ class Game : public std::enable_shared_from_this<Game> {
   // parameter values, including defaulted values. Returns empty parameters
   // otherwise.
   GameParameters GetParameters() const {
-    absl::MutexLock lock(&mutex_defaulted_parameters_);
+    absl::MutexLock lock(mutex_defaulted_parameters_);
     GameParameters params = game_parameters_;
     params.insert(defaulted_parameters_.begin(), defaulted_parameters_.end());
     return params;
@@ -882,11 +1032,14 @@ class Game : public std::enable_shared_from_this<Game> {
 
   // The maximum number of chance nodes occurring in any history of the game.
   // This is typically something like the number of times dice are rolled.
+  // For deterministic games, this is 0, otherwise it defaults to the max game
+  // length as a loose upper bound.
   virtual int MaxChanceNodesInHistory() const {
     if (GetType().chance_mode == GameType::ChanceMode::kDeterministic) {
       return 0;
+    } else {
+      return MaxGameLength();
     }
-    SpielFatalError("MaxChanceNodesInHistory() is not implemented");
   }
 
   // The maximum number of moves in the game. The value State::MoveNumber()
@@ -1010,7 +1163,7 @@ class Game : public std::enable_shared_from_this<Game> {
     }
 
     // Return the default value, storing it.
-    absl::MutexLock lock(&mutex_defaulted_parameters_);
+    absl::MutexLock lock(mutex_defaulted_parameters_);
     iter = defaulted_parameters_.find(key);
     if (iter == defaulted_parameters_.end()) {
       // We haven't previously defaulted this value, so store the default we
@@ -1043,6 +1196,13 @@ class Game : public std::enable_shared_from_this<Game> {
       ABSL_GUARDED_BY(mutex_defaulted_parameters_);
   mutable absl::Mutex mutex_defaulted_parameters_;
 };
+
+inline std::unique_ptr<State> State::StartingState() const {
+  if (!starting_state_str_.empty()) {
+    return game_->NewInitialState(nlohmann::json::parse(starting_state_str_));
+  }
+  return nullptr;
+}
 
 #define CONCAT_(x, y) x##y
 #define CONCAT(x, y) CONCAT_(x, y)
@@ -1100,10 +1260,27 @@ std::shared_ptr<const Game> LoadGame(const std::string& game_string);
 std::shared_ptr<const Game> LoadGame(const std::string& short_name,
                                      const GameParameters& params);
 
+// Loads multiple games from a single string separated by a separator string
+// (with whitespace allowed).
+// E.g. "tic_tac_toe / leduc_poker / breakthrough(rows=6, columns=6)".
+std::vector<std::shared_ptr<const Game>> LoadGames(
+    const std::string& multi_game_string,
+    const std::string& separator = "/");
+
 // Returns a new game object with the specified parameters; reads the name
 // of the game from the 'name' parameter (which is not passed to the game
 // implementation).
 std::shared_ptr<const Game> LoadGame(GameParameters params);
+
+// Returns a new game object from a GameParametersStruct.
+// The struct is converted to JSON, then to GameParameters, then LoadGame is
+// called. This provides a type-safe way to configure games.
+std::shared_ptr<const Game> LoadGame(const GameParametersStruct& params_struct);
+
+// Returns a new game object from a JSON string.
+// The JSON must contain a "game_name" key identifying the game.
+// Other keys are passed as parameters to the game.
+std::shared_ptr<const Game> LoadGameFromJson(const std::string& json_string);
 
 // Normalize a policy into a proper discrete distribution where the
 // probabilities sum to 1.

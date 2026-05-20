@@ -16,13 +16,19 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "open_spiel/abseil-cpp/absl/strings/str_cat.h"
+#include "open_spiel/abseil-cpp/absl/strings/str_join.h"
+#include "open_spiel/abseil-cpp/absl/types/span.h"
 #include "open_spiel/game_parameters.h"
+#include "open_spiel/observer.h"
 #include "open_spiel/spiel.h"
+#include "open_spiel/spiel_globals.h"
 #include "open_spiel/spiel_utils.h"
 
 namespace open_spiel {
@@ -34,36 +40,16 @@ namespace {
 // header).
 constexpr int kNumBarPosHumanReadable = 25;
 constexpr int kNumOffPosHumanReadable = -2;
-constexpr int kNumNonDoubleOutcomes = 15;
-
-const std::vector<std::pair<Action, double>> kChanceOutcomes = {
-    std::pair<Action, double>(0, 1.0 / 18),
-    std::pair<Action, double>(1, 1.0 / 18),
-    std::pair<Action, double>(2, 1.0 / 18),
-    std::pair<Action, double>(3, 1.0 / 18),
-    std::pair<Action, double>(4, 1.0 / 18),
-    std::pair<Action, double>(5, 1.0 / 18),
-    std::pair<Action, double>(6, 1.0 / 18),
-    std::pair<Action, double>(7, 1.0 / 18),
-    std::pair<Action, double>(8, 1.0 / 18),
-    std::pair<Action, double>(9, 1.0 / 18),
-    std::pair<Action, double>(10, 1.0 / 18),
-    std::pair<Action, double>(11, 1.0 / 18),
-    std::pair<Action, double>(12, 1.0 / 18),
-    std::pair<Action, double>(13, 1.0 / 18),
-    std::pair<Action, double>(14, 1.0 / 18),
-    std::pair<Action, double>(15, 1.0 / 36),
-    std::pair<Action, double>(16, 1.0 / 36),
-    std::pair<Action, double>(17, 1.0 / 36),
-    std::pair<Action, double>(18, 1.0 / 36),
-    std::pair<Action, double>(19, 1.0 / 36),
-    std::pair<Action, double>(20, 1.0 / 36),
-};
+constexpr int kNumNonDoubleOutcomes = 30;  // 5*6
 
 const std::vector<std::vector<int>> kChanceOutcomeValues = {
-    {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {2, 3}, {2, 4},
-    {2, 5}, {2, 6}, {3, 4}, {3, 5}, {3, 6}, {4, 5}, {4, 6},
-    {5, 6}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}, {6, 6}};
+    {1, 2}, {2, 1}, {1, 3}, {3, 1}, {1, 4}, {4, 1},
+    {1, 5}, {5, 1}, {1, 6}, {6, 1}, {2, 3}, {3, 2},
+    {2, 4}, {4, 2}, {2, 5}, {5, 2}, {2, 6}, {6, 2},
+    {3, 4}, {4, 3}, {3, 5}, {5, 3}, {3, 6}, {6, 3},
+    {4, 5}, {5, 4}, {4, 6}, {6, 4}, {5, 6}, {6, 5},
+    {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}, {6, 6}
+};
 
 int NumCheckersPerPlayer(const Game* game) {
   return static_cast<const BackgammonGame*>(game)->NumCheckersPerPlayer();
@@ -87,7 +73,8 @@ const GameType kGameType{
     /*parameter_specification=*/
     {{"hyper_backgammon", GameParameter(kDefaultHyperBackgammon)},
      {"scoring_type",
-      GameParameter(static_cast<std::string>(kDefaultScoringType))}}};
+      GameParameter(static_cast<std::string>(kDefaultScoringType))},
+     {"max_player_turns", GameParameter(kDefaultMaxPlayerTurns)}}};
 
 static std::shared_ptr<const Game> Factory(const GameParameters& params) {
   return std::shared_ptr<const Game>(new BackgammonGame(params));
@@ -175,11 +162,8 @@ std::string BackgammonState::ActionToString(Player player,
                           kChanceOutcomeValues[move_id][1], ")");
     } else {
       // Initial roll to determine who starts.
-      const char* starter = (move_id < kNumNonDoubleOutcomes ?
-                             "X starts" : "O starts");
-      if (move_id >= kNumNonDoubleOutcomes) {
-        move_id -= kNumNonDoubleOutcomes;
-      }
+      const char* starter =
+          (move_id % 2 == 0 ? "X starts" : "O starts");
       return absl::StrCat("chance outcome ", move_id, " ", starter, ", ",
                           "(roll: ", kChanceOutcomeValues[move_id][0],
                           kChanceOutcomeValues[move_id][1], ")");
@@ -394,9 +378,17 @@ Player BackgammonState::CurrentPlayer() const {
 int BackgammonState::Opponent(int player) const { return 1 - player; }
 
 void BackgammonState::RollDice(int outcome) {
-  dice_.push_back(kChanceOutcomeValues[outcome][0]);
-  dice_.push_back(kChanceOutcomeValues[outcome][1]);
+  SPIEL_CHECK_TRUE(dice_.empty());
+  SetDice(kChanceOutcomeValues[outcome]);
 }
+
+void BackgammonState::SetDice(const std::vector<int>& dice) {
+  dice_ = dice;
+  if (dice_[0] >= dice_[1]) {
+    std::swap(dice_[0], dice_[1]);
+  }
+}
+
 
 int BackgammonState::DiceValue(int i) const {
   SPIEL_CHECK_GE(i, 0);
@@ -427,14 +419,14 @@ void BackgammonState::DoApplyAction(Action move) {
       // starts with (see RollDice(move) below). These 30 possibilities are
       // constructed in GetChanceOutcomes().
       SPIEL_CHECK_TRUE(dice_.empty());
-      if (move < kNumNonDoubleOutcomes) {
+      if (move % 2 == 0) {
         // X starts.
-        cur_player_ = prev_player_ = kXPlayerId;
+        cur_player_ = kXPlayerId;
       } else {
         // O Starts
-        cur_player_ = prev_player_ = kOPlayerId;
-        move -= kNumNonDoubleOutcomes;
+        cur_player_ = kOPlayerId;
       }
+      prev_player_ = kChancePlayerId;
       RollDice(move);
       turns_ = 0;
       return;
@@ -630,7 +622,7 @@ std::vector<CheckerMove> BackgammonState::SpielMoveToCheckerMoves(
 }
 
 std::vector<CheckerMove> BackgammonState::AugmentWithHitInfo(
-    int player, const std::vector<CheckerMove> &cmoves) const {
+    int player, const std::vector<CheckerMove>& cmoves) const {
   std::vector<CheckerMove> new_cmoves = cmoves;
   for (int i = 0; i < 2; ++i) {
     new_cmoves[i].hit = IsHit(player, cmoves[i].pos, cmoves[i].num);
@@ -1104,13 +1096,19 @@ std::vector<Action> BackgammonState::ProcessLegalMoves(
   // both, the player must play the larger one. When neither number can be used,
   // the player loses his turn. In the case of doubles, when all four numbers
   // cannot be played, the player must play as many numbers as he can.
+
+  // TODO(author5): below we filter out actions that are mapped to the same
+  // string representation as they have the same effect, even when applied in
+  // different orders. A better fix would be to remove the duplicate actions
+  // from the action space altogether.
   std::vector<Action> legal_actions;
   int max_roll = -1;
   for (const auto& move : movelist) {
     if (max_moves == 2) {
       // Only add moves that are size 2.
       if (move.size() == 2) {
-        legal_actions.push_back(CheckerMovesToSpielMove(move));
+        int action = CheckerMovesToSpielMove(move);
+        legal_actions.push_back(action);
       }
     } else if (max_moves == 1) {
       // We are just finding the maximum roll.
@@ -1122,7 +1120,8 @@ std::vector<Action> BackgammonState::ProcessLegalMoves(
     // Another round to add those that have the max die roll.
     for (const auto& move : movelist) {
       if (move[0].num == max_roll) {
-        legal_actions.push_back(CheckerMovesToSpielMove(move));
+        int action = CheckerMovesToSpielMove(move);
+        legal_actions.push_back(action);
       }
     }
   }
@@ -1157,15 +1156,20 @@ std::vector<std::pair<Action, double>> BackgammonState::ChanceOutcomes() const {
     // Doubles not allowed for the initial roll to determine who goes first.
     // Range 0-14: X goes first, range 15-29: O goes first.
     std::vector<std::pair<Action, double>> outcomes;
-    int num_outcomes = kNumNonDoubleOutcomes * 2;
-    outcomes.reserve(num_outcomes);
-    const double uniform_prob = 1.0 / num_outcomes;
-    for (Action action = 0; action < num_outcomes; ++action) {
+    outcomes.reserve(kNumNonDoubleOutcomes);
+    const double uniform_prob = 1.0 / kNumNonDoubleOutcomes;
+    for (Action action = 0; action < kNumNonDoubleOutcomes; ++action) {
       outcomes.push_back({action, uniform_prob});
     }
     return outcomes;
   } else {
-    return kChanceOutcomes;
+    std::vector<std::pair<Action, double>> outcomes;
+    outcomes.reserve(kNumChanceOutcomes);
+    const double uniform_prob = 1.0 / kNumChanceOutcomes;
+    for (Action action = 0; action < kNumChanceOutcomes; ++action) {
+      outcomes.push_back({action, uniform_prob});
+    }
+    return outcomes;
   }
 }
 
@@ -1217,6 +1221,8 @@ std::string BackgammonState::ToString() const {
   absl::StrAppend(&board_str, "Turn: ");
   absl::StrAppend(&board_str, CurPlayerToString(cur_player_));
   absl::StrAppend(&board_str, "\n");
+  absl::StrAppend(&board_str, "Previous player: ", prev_player_, "\n");
+  absl::StrAppend(&board_str, "Extra turn: ", double_turn_ ? 1 : 0, "\n");
   absl::StrAppend(&board_str, "Dice: ");
   absl::StrAppend(&board_str, !dice_.empty() ? DiceToString(dice_[0]) : "");
   absl::StrAppend(&board_str, dice_.size() > 1 ? DiceToString(dice_[1]) : "");
@@ -1237,8 +1243,13 @@ std::string BackgammonState::ToString() const {
 }
 
 bool BackgammonState::IsTerminal() const {
-  return (scores_[kXPlayerId] == NumCheckersPerPlayer(game_.get()) ||
-          scores_[kOPlayerId] == NumCheckersPerPlayer(game_.get()));
+  const BackgammonGame* game = static_cast<const BackgammonGame*>(game_.get());
+  if (turns_ > game->MaxPlayerTurns()) {
+    return true;
+  } else {
+    return (scores_[kXPlayerId] == NumCheckersPerPlayer(game_.get()) ||
+            scores_[kOPlayerId] == NumCheckersPerPlayer(game_.get()));
+  }
 }
 
 std::vector<double> BackgammonState::Returns() const {
@@ -1287,7 +1298,7 @@ void BackgammonState::SetState(int cur_player, bool double_turn,
                                const std::vector<std::vector<int>>& board) {
   cur_player_ = cur_player;
   double_turn_ = double_turn;
-  dice_ = dice;
+  SetDice(dice);
   bar_ = bar;
   scores_ = scores;
   board_ = board;
@@ -1302,7 +1313,9 @@ BackgammonGame::BackgammonGame(const GameParameters& params)
     : Game(kGameType, params),
       scoring_type_(
           ParseScoringType(ParameterValue<std::string>("scoring_type"))),
-      hyper_backgammon_(ParameterValue<bool>("hyper_backgammon")) {}
+      hyper_backgammon_(ParameterValue<bool>("hyper_backgammon")),
+      max_player_turns_(ParameterValue<int>("max_player_turns",
+                                            kDefaultMaxPlayerTurns)) {}
 
 double BackgammonGame::MaxUtility() const {
   if (hyper_backgammon_) {

@@ -15,24 +15,35 @@
 #include "open_spiel/games/universal_poker/universal_poker.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "open_spiel/abseil-cpp/absl/time/clock.h"
+#include "open_spiel/abseil-cpp/absl/time/time.h"
 #include "open_spiel/abseil-cpp/absl/algorithm/container.h"
 #include "open_spiel/abseil-cpp/absl/container/flat_hash_map.h"
 #include "open_spiel/abseil-cpp/absl/flags/flag.h"
 #include "open_spiel/abseil-cpp/absl/flags/parse.h"
 #include "open_spiel/abseil-cpp/absl/strings/match.h"
+#include "open_spiel/abseil-cpp/absl/strings/str_cat.h"
+#include "open_spiel/abseil-cpp/absl/strings/str_format.h"
 #include "open_spiel/abseil-cpp/absl/strings/string_view.h"
 #include "open_spiel/games/universal_poker/acpc/project_acpc_server/game.h"
 #include "open_spiel/algorithms/evaluate_bots.h"
 #include "open_spiel/canonical_game_strings.h"
 #include "open_spiel/game_parameters.h"
+#include "open_spiel/observer.h"
+#include "open_spiel/policy.h"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_bots.h"
+#include "open_spiel/spiel_globals.h"
 #include "open_spiel/spiel_utils.h"
 #include "open_spiel/tests/basic_tests.h"
 #include "open_spiel/utils/file.h"
@@ -233,14 +244,8 @@ void BasicUniversalPokerTests() {
   testing::RandomSimTestCustomObserver(*LoadGame("universal_poker"), observer);
 }
 
-constexpr absl::string_view kHULHString =
-    ("universal_poker(betting=limit,numPlayers=2,numRounds=4,blind=50 100,"
-     "firstPlayer=2 1,numSuits=4,numRanks=13,numHoleCards=2,numBoardCards=0 3 "
-     "1 "
-     "1,raiseSize=200 200 400 400,maxRaises=3 4 4 4)");
-
 void ChumpPolicyTests() {
-  std::shared_ptr<const Game> game = LoadGame(std::string(kHULHString));
+  std::shared_ptr<const Game> game = LoadGame(HulhGameString("fcpa"));
   std::vector<std::unique_ptr<Bot>> bots;
   bots.push_back(MakePolicyBot(*game, /*player_id=*/0, /*seed=*/0,
                                std::make_unique<open_spiel::UniformPolicy>()));
@@ -1000,6 +1005,300 @@ void Bet4ConfusedForHalfPotRegressionTest() {
   SPIEL_CHECK_EQ(state->ActionToString(4), "player=2 move=Bet4");
 }
 
+void TestToStringAtChanceNodesFullGame() {
+  std::shared_ptr<const Game> game = LoadGame(HulhGameString("fullgame"));
+  std::unique_ptr<State> state = game->NewInitialState();
+
+  std::vector<Action> action_sequence = {10, 11, 12, 13};
+  for (Action action : action_sequence) {
+    std::cout << "Applying action " << action
+              << "(" << state->ActionToString(kChancePlayerId, action) << ")"
+              << std::endl;
+    state->ApplyAction(action);
+    std::cout << "state: " << state->ToString() << std::endl;
+  }
+}
+
+void CalculateOddsTest2p() {
+  std::shared_ptr<const Game> game = LoadGame(HunlGameString("fullgame"));
+  std::unique_ptr<State> state = game->NewInitialState();
+  std::vector<std::string> actions = {
+    "player=-1 move=Deal As",
+    "player=-1 move=Deal Ah",
+    "player=-1 move=Deal Kd",
+    "player=-1 move=Deal Kc",
+  };
+  for (const std::string& action : actions) {
+    state->ApplyAction(state->StringToAction(action));
+  }
+
+  std::mt19937 rng;
+  const UniversalPokerState* up_state =
+      down_cast<const UniversalPokerState*>(state.get());
+  absl::Time start_time = absl::Now();
+  std::vector<double> equities = up_state->CalculateOdds(1000000, rng);
+  absl::Time end_time = absl::Now();
+  std::cout << "1M sims took: " << end_time - start_time << std::endl;
+  SPIEL_CHECK_EQ(equities.size(), 4);
+  std::cout << "P0 win: " << equities[0] << ", P0 draw: " << equities[1]
+            << ", P1 win: " << equities[2] << ", P1 draw: " << equities[3]
+            << std::endl;
+  SPIEL_CHECK_LT(std::abs(equities[0] - 0.81), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[1] - 0.0038), 0.001);
+  SPIEL_CHECK_LT(std::abs(equities[2] - 0.186), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[3] - 0.0038), 0.001);
+}
+
+void CalculateOddsTest3p() {
+  std::shared_ptr<const Game> game =
+      LoadGame(Multiway3max_1_2GameString("fullgame", 200, 200, 200));
+  std::unique_ptr<State> state = game->NewInitialState();
+  std::vector<std::string> actions = {
+    "player=-1 move=Deal As",
+    "player=-1 move=Deal Ac",
+    "player=-1 move=Deal Qs",
+    "player=-1 move=Deal Qc",
+    "player=-1 move=Deal Qh",
+    "player=-1 move=Deal Qd",
+    "player=2 move=Call",
+    "player=0 move=Call",
+    "player=1 move=Call",
+    "player=-1 move=Deal Jh",
+    "player=-1 move=Deal Th",
+    "player=-1 move=Deal 9h",
+  };
+  for (const std::string& action : actions) {
+    state->ApplyAction(state->StringToAction(action));
+  }
+
+  std::mt19937 rng;
+  const UniversalPokerState* up_state =
+      down_cast<const UniversalPokerState*>(state.get());
+  absl::Time start_time = absl::Now();
+  std::vector<double> equities = up_state->CalculateOdds(1000000, rng);
+  absl::Time end_time = absl::Now();
+  std::cout << "1M sims took: " << end_time - start_time << std::endl;
+  SPIEL_CHECK_EQ(equities.size(), 6);
+  std::cout << "P0 win: " << equities[0] << ", P0 draw: " << equities[1]
+            << ", P1 win: " << equities[2] << ", P1 draw: " << equities[3]
+            << ", P2 win: " << equities[4] << ", P2 draw: " << equities[5]
+            << std::endl;
+  SPIEL_CHECK_LT(std::abs(equities[0] - 0.43), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[1] - 0.0), 0.0000001);
+  SPIEL_CHECK_LT(std::abs(equities[2] - 0.0), 0.0000001);
+  SPIEL_CHECK_LT(std::abs(equities[3] - 0.203), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[4] - 0.367), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[5] - 0.203), 0.02);
+}
+
+void CalculateOddsTestInitialState() {
+  std::shared_ptr<const Game> game = LoadGame(HunlGameString("fullgame"));
+  std::unique_ptr<State> state = game->NewInitialState();
+  std::mt19937 rng;
+  const UniversalPokerState* up_state =
+      down_cast<const UniversalPokerState*>(state.get());
+  absl::Time start_time = absl::Now();
+  std::vector<double> equities = up_state->CalculateOdds(1000000, rng);
+  absl::Time end_time = absl::Now();
+  std::cout << "1M sims took: " << end_time - start_time << std::endl;
+  SPIEL_CHECK_EQ(equities.size(), 4);
+  std::cout << "P0 win: " << equities[0] << ", P0 draw: " << equities[1]
+            << ", P1 win: " << equities[2] << ", P1 draw: " << equities[3]
+            << std::endl;
+  SPIEL_CHECK_LT(std::abs(equities[0] - 0.48), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[1] - 0.04), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[2] - 0.48), 0.02);
+  SPIEL_CHECK_LT(std::abs(equities[3] - 0.04), 0.02);
+}
+
+void CalculateOddsTestTerminalState() {
+  // Using fcpa betting abstraction for broader test coverage.
+  std::shared_ptr<const Game> game = LoadGame(HunlGameString("fcpa"));
+  std::unique_ptr<State> state = game->NewInitialState();
+  std::vector<std::string> actions = {
+    "player=-1 move=Deal 2s",
+    "player=-1 move=Deal 2h",
+    "player=-1 move=Deal 2d",
+    "player=-1 move=Deal 2c",
+    "player=1 move=Call",
+    "player=0 move=Call",
+    "player=-1 move=Deal 5h",
+    "player=-1 move=Deal 6d",
+    "player=-1 move=Deal 7c",
+    "player=0 move=Call",
+    "player=1 move=Call",
+    "player=-1 move=Deal 8s",
+    "player=0 move=Call",
+    "player=1 move=Call",
+    "player=-1 move=Deal 9d",
+    "player=0 move=Call",
+    "player=1 move=Call",
+  };
+  for (const std::string& action : actions) {
+    state->ApplyAction(state->StringToAction(action));
+  }
+
+  std::mt19937 rng;
+  const UniversalPokerState* up_state =
+      down_cast<const UniversalPokerState*>(state.get());
+  absl::Time start_time = absl::Now();
+  std::vector<double> equities = up_state->CalculateOdds(1000, rng);
+  absl::Time end_time = absl::Now();
+  std::cout << "1k sims took: " << end_time - start_time << std::endl;
+  SPIEL_CHECK_EQ(equities.size(), 4);
+  std::cout << "P0 win: " << equities[0] << ", P0 draw: " << equities[1]
+            << ", P1 win: " << equities[2] << ", P1 draw: " << equities[3]
+            << std::endl;
+  SPIEL_CHECK_LT(std::abs(equities[0] - 0.00000001), 0.0001);
+  SPIEL_CHECK_LT(std::abs(equities[1] - 1.0), 0.0001);
+  SPIEL_CHECK_LT(std::abs(equities[2] - 0.00000001), 0.0001);
+  SPIEL_CHECK_LT(std::abs(equities[3] - 1.0), 0.0001);
+}
+
+void TestStateStruct() {
+  std::shared_ptr<const Game> game = LoadGame(HunlGameString("fullgame"));
+  std::unique_ptr<State> state = game->NewInitialState();
+  UniversalPokerState* up_state = down_cast<UniversalPokerState*>(state.get());
+  std::unique_ptr<StateStruct> state_struct = up_state->ToStruct();
+  SPIEL_CHECK_EQ(state_struct->ToJson(), up_state->ToJson());
+  UniversalPokerStateStruct* up_state_struct =
+      down_cast<UniversalPokerStateStruct*>(state_struct.get());
+  SPIEL_CHECK_EQ(up_state_struct->current_player, kChancePlayerId);
+  SPIEL_CHECK_EQ(up_state_struct->blinds, std::vector<int>({100, 50}));
+  SPIEL_CHECK_EQ(up_state_struct->betting_history, "");
+  SPIEL_CHECK_EQ(up_state_struct->pot_size, 150);
+  SPIEL_CHECK_EQ(up_state_struct->starting_stacks,
+                 std::vector<int>({20000, 20000}));
+  SPIEL_CHECK_EQ(up_state_struct->board_cards.size(), 0);
+  SPIEL_CHECK_EQ(up_state_struct->player_hands.size(), 2);
+  SPIEL_CHECK_TRUE(up_state_struct->player_hands[0].empty());
+  SPIEL_CHECK_TRUE(up_state_struct->player_hands[1].empty());
+  SPIEL_CHECK_EQ(up_state_struct->player_contributions.size(), 2);
+  SPIEL_CHECK_EQ(up_state_struct->player_contributions[0], 100);
+  SPIEL_CHECK_EQ(up_state_struct->player_contributions[1], 50);
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types.size(), 2);
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[0], "High Card");
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[1], "High Card");
+  SPIEL_CHECK_EQ(up_state_struct->best_five_card_hands.size(), 2);
+  SPIEL_CHECK_TRUE(up_state_struct->best_five_card_hands[0].empty());
+  SPIEL_CHECK_TRUE(up_state_struct->best_five_card_hands[1].empty());
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal As"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Ac"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Ks"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Kc"));
+  state->ApplyAction(state->StringToAction("player=1 move=Bet300"));
+  state->ApplyAction(state->StringToAction("player=0 move=Bet1000"));
+  state->ApplyAction(state->StringToAction("player=1 move=Call"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Qc"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Js"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal Tc"));
+  state->ApplyAction(state->StringToAction("player=0 move=Call"));
+  state_struct = up_state->ToStruct();
+  up_state_struct = down_cast<UniversalPokerStateStruct*>(state_struct.get());
+  SPIEL_CHECK_EQ(up_state_struct->board_cards, "QcJsTc");
+  SPIEL_CHECK_EQ(up_state_struct->player_hands[0], "AsAc");
+  SPIEL_CHECK_EQ(up_state_struct->player_hands[1], "KsKc");
+  SPIEL_CHECK_EQ(up_state_struct->player_contributions[0], 1000);
+  SPIEL_CHECK_EQ(up_state_struct->player_contributions[1], 1000);
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types.size(), 2);
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[0], "Pair");
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[1], "Pair");
+  SPIEL_CHECK_EQ(up_state_struct->best_five_card_hands[0], "AsAcQcJsTc");
+  SPIEL_CHECK_EQ(up_state_struct->best_five_card_hands[1], "KsKcQcJsTc");
+  state->ApplyAction(state->StringToAction("player=1 move=Call"));
+  state->ApplyAction(state->StringToAction("player=-1 move=Deal 9c"));
+  state_struct = up_state->ToStruct();
+  up_state_struct = down_cast<UniversalPokerStateStruct*>(state_struct.get());
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[0], "Pair");
+  SPIEL_CHECK_EQ(up_state_struct->best_hand_rank_types[1], "Straight");
+}
+
+void TestResampleFromInfostate1HoleCard() {
+  std::shared_ptr<const Game> game = LoadGame("universal_poker");
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  state->ApplyAction(4);
+  state->ApplyAction(1);
+  state->ApplyAction(1);
+  state->ApplyAction(8);
+
+  std::mt19937 rng(42);
+  auto rng_func = [&rng]() -> double {
+    return std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+  };
+
+  auto* up_state = down_cast<UniversalPokerState*>(state.get());
+  auto dist = up_state->GetHistoriesConsistentWithInfostate(0);
+  SPIEL_CHECK_TRUE(dist != nullptr);
+  int deck_size = 4 * 6;
+  int known_cards = 1 + 1;
+  int remaining = deck_size - known_cards;
+  SPIEL_CHECK_EQ(dist->first.size(), remaining);
+
+  std::string orig_infostate_p0 = state->InformationStateString(0);
+  for (const auto& s : dist->first) {
+    SPIEL_CHECK_EQ(s->CurrentPlayer(), state->CurrentPlayer());
+    SPIEL_CHECK_EQ(s->InformationStateString(0), orig_infostate_p0);
+  }
+
+  std::unique_ptr<State> resampled = state->ResampleFromInfostate(0, rng_func);
+  SPIEL_CHECK_TRUE(resampled != nullptr);
+  SPIEL_CHECK_EQ(resampled->InformationStateString(0), orig_infostate_p0);
+
+  std::string orig_infostate_p1 = state->InformationStateString(1);
+  resampled = state->ResampleFromInfostate(1, rng_func);
+  SPIEL_CHECK_TRUE(resampled != nullptr);
+  SPIEL_CHECK_EQ(resampled->InformationStateString(1), orig_infostate_p1);
+}
+
+void TestResampleFromInfostate2HoleCards() {
+  std::shared_ptr<const Game> game = LoadGame(
+      "universal_poker("
+      "betting=nolimit,"
+      "numPlayers=2,"
+      "numRounds=2,"
+      "blind=100 50,"
+      "firstPlayer=2 1,"
+      "numSuits=4,"
+      "numRanks=3,"
+      "numHoleCards=2,"
+      "numBoardCards=0 1,"
+      "stack=1000 1000,"
+      "bettingAbstraction=fcpa)");
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  state->ApplyAction(1);
+  state->ApplyAction(4);
+  state->ApplyAction(5);
+  state->ApplyAction(1);
+  state->ApplyAction(1);
+  state->ApplyAction(8);
+
+  std::mt19937 rng(42);
+  auto rng_func = [&rng]() -> double {
+    return std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+  };
+
+  auto* up_state = down_cast<UniversalPokerState*>(state.get());
+  auto dist = up_state->GetHistoriesConsistentWithInfostate(0);
+  SPIEL_CHECK_TRUE(dist != nullptr);
+  int deck_size = 4 * 3;
+  int known_cards = 2 + 1;
+  int remaining = deck_size - known_cards;
+  int expected_hands = remaining * (remaining - 1) / 2;
+  SPIEL_CHECK_EQ(dist->first.size(), expected_hands);
+
+  std::string orig_infostate_p0 = state->InformationStateString(0);
+  for (const auto& s : dist->first) {
+    SPIEL_CHECK_EQ(s->CurrentPlayer(), state->CurrentPlayer());
+    SPIEL_CHECK_EQ(s->InformationStateString(0), orig_infostate_p0);
+  }
+
+  std::unique_ptr<State> resampled = state->ResampleFromInfostate(0, rng_func);
+  SPIEL_CHECK_TRUE(resampled != nullptr);
+  SPIEL_CHECK_EQ(resampled->InformationStateString(0), orig_infostate_p0);
+}
+
 }  // namespace
 }  // namespace universal_poker
 }  // namespace open_spiel
@@ -1007,6 +1306,7 @@ void Bet4ConfusedForHalfPotRegressionTest() {
 int main(int argc, char **argv) {
   open_spiel::Init("", &argc, &argv, true);
   absl::ParseCommandLine(argc, argv);
+
   open_spiel::universal_poker::ChanceDealRegressionTest();
   open_spiel::universal_poker::LoadKuhnLimitWithAndWithoutGameDef();
   open_spiel::universal_poker::LoadHoldemNoLimit6PWithAndWithoutGameDef();
@@ -1037,4 +1337,12 @@ int main(int argc, char **argv) {
   open_spiel::universal_poker::TestFixedPreferenceBots();
   open_spiel::universal_poker::TestTensorsRecordsSizings();
   open_spiel::universal_poker::Bet4ConfusedForHalfPotRegressionTest();
+  open_spiel::universal_poker::TestToStringAtChanceNodesFullGame();
+  open_spiel::universal_poker::CalculateOddsTest2p();
+  open_spiel::universal_poker::CalculateOddsTest3p();
+  open_spiel::universal_poker::CalculateOddsTestInitialState();
+  open_spiel::universal_poker::CalculateOddsTestTerminalState();
+  open_spiel::universal_poker::TestStateStruct();
+  open_spiel::universal_poker::TestResampleFromInfostate1HoleCard();
+  open_spiel::universal_poker::TestResampleFromInfostate2HoleCards();
 }

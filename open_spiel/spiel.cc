@@ -15,6 +15,7 @@
 #include "open_spiel/spiel.h"
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -36,19 +37,15 @@
 #include "open_spiel/abseil-cpp/absl/strings/str_join.h"
 #include "open_spiel/abseil-cpp/absl/strings/str_split.h"
 #include "open_spiel/abseil-cpp/absl/types/span.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/game_parameters.h"
 #include "open_spiel/spiel_globals.h"
 #include "open_spiel/spiel_utils.h"
+#include "open_spiel/utils/status.h"
 #include "open_spiel/utils/usage_logging.h"
 
 namespace open_spiel {
 namespace {
-
-constexpr const int kSerializationVersion = 1;
-constexpr const char* kSerializeMetaSectionHeader = "[Meta]";
-constexpr const char* kSerializeGameSectionHeader = "[Game]";
-constexpr const char* kSerializeGameRNGStateSectionHeader = "[GameRNGState]";
-constexpr const char* kSerializeStateSectionHeader = "[State]";
 
 // Returns the available parameter keys, to be used as a utility function.
 std::string ListValidParameters(
@@ -154,7 +151,8 @@ std::shared_ptr<const Game> GameRegisterer::CreateByName(
     const std::string& short_name, const GameParameters& params) {
   // Check if it's a game with a known issue. If so, output a warning.
   if (absl::c_linear_search(GamesWithKnownIssues(), short_name)) {
-    std::cerr << "Warning! This game has known issues. Please see the games "
+    std::cerr << "Warning! The implementation of '" << short_name
+              << "' has known issues. Please see the games "
               << "list on github or the code for details." << std::endl;
   }
 
@@ -186,7 +184,7 @@ std::vector<std::string> GameRegisterer::RegisteredNames() {
 }
 
 std::vector<std::string> GameRegisterer::GamesWithKnownIssues() {
-  return {"quoridor", "rbc"};
+  return {"quoridor"};
 }
 
 std::vector<GameType> GameRegisterer::RegisteredGames() {
@@ -258,6 +256,19 @@ std::shared_ptr<const Game> LoadGame(const std::string& game_string) {
   return LoadGame(GameParametersFromString(game_string));
 }
 
+std::vector<std::shared_ptr<const Game>> LoadGames(
+    const std::string& multi_game_string,
+    const std::string& separator) {
+  std::vector<std::shared_ptr<const Game>> games;
+  std::vector<std::string> game_strings =
+      absl::StrSplit(multi_game_string, separator);
+  for (std::string game_string : game_strings) {
+    absl::StripAsciiWhitespace(&game_string);
+    games.push_back(LoadGame(game_string));
+  }
+  return games;
+}
+
 std::shared_ptr<const Game> LoadGame(const std::string& short_name,
                                      const GameParameters& params) {
   std::shared_ptr<const Game> result =
@@ -285,11 +296,68 @@ std::shared_ptr<const Game> LoadGame(GameParameters params) {
   return result;
 }
 
+std::shared_ptr<const Game> LoadGame(
+    const GameParametersStruct& params_struct) {
+  nlohmann::json json = params_struct.to_json_base();
+  if (!json.contains("game_name") ||
+      json["game_name"].get<std::string>().empty()) {
+    SpielFatalError("GameParametersStruct must have a non-empty game_name.");
+  }
+  GameParameters params;
+  params["name"] = GameParameter(json["game_name"].get<std::string>());
+  for (auto& [key, value] : json.items()) {
+    if (key == "game_name") continue;
+    if (value.is_boolean()) {
+      params[key] = GameParameter(value.get<bool>());
+    } else if (value.is_number_integer()) {
+      params[key] = GameParameter(value.get<int>());
+    } else if (value.is_number_float()) {
+      params[key] = GameParameter(value.get<double>());
+    } else if (value.is_string()) {
+      params[key] = GameParameter(value.get<std::string>());
+    } else {
+      SpielFatalError(
+          absl::StrCat("Unsupported JSON value type for key: ", key));
+    }
+  }
+  return LoadGame(params);
+}
+
+std::shared_ptr<const Game> LoadGameFromJson(const std::string& json_string) {
+  nlohmann::json json = nlohmann::json::parse(json_string);
+  if (!json.contains("game_name")) {
+    SpielFatalError("JSON game params must contain 'game_name' key.");
+  }
+  std::string game_name = json.at("game_name").get<std::string>();
+  if (game_name.empty()) {
+    SpielFatalError("JSON game params 'game_name' must not be empty.");
+  }
+  GameParameters params;
+  params["name"] = GameParameter(game_name);
+  for (auto& [key, value] : json.items()) {
+    if (key == "game_name") continue;
+    if (value.is_boolean()) {
+      params[key] = GameParameter(value.get<bool>());
+    } else if (value.is_number_integer()) {
+      params[key] = GameParameter(value.get<int>());
+    } else if (value.is_number_float()) {
+      params[key] = GameParameter(value.get<double>());
+    } else if (value.is_string()) {
+      params[key] = GameParameter(value.get<std::string>());
+    } else {
+      SpielFatalError(
+          absl::StrCat("Unsupported JSON value type for key: ", key));
+    }
+  }
+  return LoadGame(params);
+}
+
 State::State(std::shared_ptr<const Game> game)
     : game_(game),
       num_distinct_actions_(game->NumDistinctActions()),
       num_players_(game->NumPlayers()),
-      move_number_(0) {}
+      move_number_(0),
+      starting_state_str_() {}
 
 void NormalizePolicy(ActionsAndProbs* policy) {
   const double sum = absl::c_accumulate(
@@ -353,7 +421,12 @@ std::string State::Serialize() const {
   SPIEL_CHECK_NE(game_->GetType().chance_mode,
                  GameType::ChanceMode::kSampledStochastic);
   SPIEL_CHECK_NE(game_->GetType().dynamics, GameType::Dynamics::kMeanField);
-  return absl::StrCat(absl::StrJoin(History(), "\n"), "\n");
+  std::string starting_state_str;
+  if (!starting_state_str_.empty()) {
+    starting_state_str = absl::StrCat(
+        kSerializeStartingState, starting_state_str_, "\n");
+  }
+  return absl::StrCat(starting_state_str, absl::StrJoin(History(), "\n"), "\n");
 }
 
 Action State::StringToAction(Player player,
@@ -379,13 +452,12 @@ void State::ApplyAction(Action action_id) {
 
 void State::ApplyActionWithLegalityCheck(Action action_id) {
   std::vector<Action> legal_actions = LegalActions();
-  if (absl::c_find(legal_actions, action_id) == legal_actions.end()) {
-    Player cur_player = CurrentPlayer();
-    SpielFatalError(
-        absl::StrCat("Current player ", cur_player, " calling ApplyAction ",
-                     "with illegal action (", action_id, "): ",
-                     ActionToString(cur_player, action_id)));
-  }
+  SPIEL_CHECK_TRUE_WSI(
+      absl::c_find(legal_actions, action_id) != legal_actions.end(),
+      absl::StrCat("Current player ", CurrentPlayer(), " calling ApplyAction ",
+                   "with illegal action (", action_id,
+                   "): ", ActionToString(CurrentPlayer(), action_id)),
+      *this->GetGame(), *this);
   ApplyAction(action_id);
 }
 
@@ -403,15 +475,43 @@ void State::ApplyActions(const std::vector<Action>& actions) {
 void State::ApplyActionsWithLegalityChecks(const std::vector<Action>& actions) {
   for (Player player = 0; player < actions.size(); ++player) {
     std::vector<Action> legal_actions = LegalActions(player);
-    if (!legal_actions.empty() &&
-        absl::c_find(legal_actions, actions[player]) == legal_actions.end()) {
-      SpielFatalError(
-          absl::StrCat("Player ", player, " calling ApplyAction ",
-                       "with illegal action (", actions[player], "): ",
-                       ActionToString(player, actions[player])));
+    if (legal_actions.empty()) {
+      continue;
     }
+    SPIEL_CHECK_TRUE_WSI(
+        absl::c_find(legal_actions, actions[player]) != legal_actions.end(),
+        absl::StrCat("Player ", player, " calling ApplyActions ",
+                     "with illegal action (", actions[player],
+                     "): ", ActionToString(player, actions[player])),
+        *this->GetGame(), *this);
   }
   ApplyActions(actions);
+}
+
+Status State::ValidateActionStruct(
+    const ActionStruct& action_struct) const {
+  std::vector<Action> actions = StructToActions(action_struct);
+  std::vector<Action> legal = LegalActions();
+  for (Action action : actions) {
+    if (absl::c_find(legal, action) == legal.end()) {
+      return ErrorStatus(absl::StrCat(
+          "Illegal action: ", action_struct.ToJson(),
+          " (action ", action, " = '", ActionToString(action),
+          "' is not legal)"));
+    }
+  }
+  return OkStatus();
+}
+
+Status State::ApplyActionStruct(const ActionStruct& action_struct) {
+  Status status = ValidateActionStruct(action_struct);
+  if (!status.ok()) {
+    return status;
+  }
+  for (Action action : StructToActions(action_struct)) {
+    ApplyAction(action);
+  }
+  return OkStatus();
 }
 
 std::vector<int> State::LegalActionsMask(Player player) const {
@@ -446,12 +546,19 @@ std::unique_ptr<State> Game::DeserializeState(const std::string& str) const {
   SPIEL_CHECK_NE(game_type_.dynamics,
                  GameType::Dynamics::kMeanField);
 
-  std::unique_ptr<State> state = NewInitialState();
-  if (str.empty()) {
-    return state;
-  }
+  int serialize_starting_state_str_len = std::strlen(kSerializeStartingState);
   std::vector<std::string> lines = absl::StrSplit(str, '\n');
-  for (int i = 0; i < lines.size(); ++i) {
+  std::unique_ptr<State> state;
+  bool skip_first_line = false;
+  if (!lines.empty() && lines[0].find(kSerializeStartingState) == 0) {
+    std::string starting_state_str =
+        lines[0].substr(serialize_starting_state_str_len);
+    state = NewInitialState(starting_state_str);
+    skip_first_line = true;
+  } else {
+    state = NewInitialState();
+  }
+  for (int i = skip_first_line ? 1 : 0; i < lines.size(); ++i) {
     if (lines[i].empty()) continue;
     if (state->IsSimultaneousNode()) {
       std::vector<Action> actions;
@@ -834,6 +941,23 @@ void State::InformationStateTensor(Player player,
   // Retained for backwards compatibility.
   values->resize(game_->InformationStateTensorSize());
   InformationStateTensor(player, absl::MakeSpan(*values));
+}
+
+bool State::IsInitialNonChanceState() const {
+  if (IsChanceNode()) {
+    return false;
+  }
+  SPIEL_CHECK_EQ(GetGame()->GetType().chance_mode,
+                 GameType::ChanceMode::kExplicitStochastic);
+  std::vector<Action> history = History();
+  std::unique_ptr<State> state = GetGame()->NewInitialState();
+  for (Action action : history) {
+    if (!state->IsChanceNode()) {
+      return false;
+    }
+    state->ApplyAction(action);
+  }
+  return true;
 }
 
 bool State::PlayerAction::operator==(const PlayerAction& other) const {

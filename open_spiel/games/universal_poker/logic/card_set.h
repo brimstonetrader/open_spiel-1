@@ -25,6 +25,29 @@ namespace logic {
 
 constexpr int kMaxSuits = 4;  // Also defined in ACPC game.h
 
+// The following values are from ACPC evalHandTables.
+constexpr int kHandClassHighCard = 0;
+constexpr int kHandClassPair = 1287;
+constexpr int kHandClassTwoPair = 5005;
+constexpr int kHandClassThreeOfAKind = 8606;
+constexpr int kHandClassStraight = 9620;
+constexpr int kHandClassFlush = 9633;
+constexpr int kHandClassFullHouse = 10920;
+constexpr int kHandClassFourOfAKind = 11934;
+constexpr int kHandClassStraightFlush = 12103;
+
+enum HandRankType {
+  kHighCard = 1,
+  kPair,
+  kTwoPair,
+  kThreeOfAKind,
+  kStraight,
+  kFlush,
+  kFullHouse,
+  kFourOfAKind,
+  kStraightFlush
+};
+
 // This is an equivalent wrapper to acpc evalHandTables.Cardset.
 // It stores the cards for each color over 16 * 4 bits. The use of a Union
 // allows to access only a specific color (16 bits) using bySuit[color].
@@ -44,23 +67,31 @@ class CardSet {
   // Returns a set containing num_ranks cards per suit for num_suits.
   CardSet(uint16_t num_suits, uint16_t num_ranks);
 
+  std::string CardToString(uint8_t card) const;
   std::string ToString() const;
   // Returns the cards present in this set in ascending order.
   std::vector<uint8_t> ToCardArray() const;
 
   // Add a card, as MAX_RANKS * <suite> + <rank> to the CardSet.
   void AddCard(uint8_t card);
-  // Toogle (does not remove) the bit associated to `card`.
+  // Toggle (does not remove) the bit associated to `card`.
   void RemoveCard(uint8_t card);
   bool ContainsCards(uint8_t card) const;
 
   int NumCards() const;
   // Returns the ranking value of this set of cards as evaluated by ACPC.
   int RankCards() const;
+  // Returns hand rank type, e.g. pair, straight, etc.
+  HandRankType GetHandRank() const;
+  // Returns the best 5 cards from CardSet.
+  CardSet GetBest5Cards() const;
 
   // Returns all the possible nbCards-subsets of this CardSet.
-  std::vector<CardSet> SampleCards(int nbCards);
+  std::vector<CardSet> Combinations(int nbCards) const;
 };
+
+// Returns hand rank type as string.
+std::string HandRankToString(HandRankType rank);
 
 // Returns the lexicographically next permutation of the supplied bits.
 // See https://graphics.stanford.edu/~seander/bithacks.html#NextBitPermutation

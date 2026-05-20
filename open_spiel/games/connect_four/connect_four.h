@@ -15,13 +15,18 @@
 #ifndef OPEN_SPIEL_GAMES_CONNECT_FOUR_H_
 #define OPEN_SPIEL_GAMES_CONNECT_FOUR_H_
 
-#include <array>
-#include <map>
+#include <functional>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <vector>
 
+#include "open_spiel/abseil-cpp/absl/types/optional.h"
+#include "open_spiel/abseil-cpp/absl/types/span.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
+#include "open_spiel/game_parameters.h"
 #include "open_spiel/spiel.h"
+#include "open_spiel/spiel_utils.h"
 
 // Simple game of Connect Four
 // https://en.wikipedia.org/wiki/Connect_Four
@@ -30,15 +35,22 @@
 // https://archive.ics.uci.edu/ml/datasets/Connect-4
 //
 // Parameters: none
+//
+//   "egocentric_obs_tensor"   bool  Enable the egocentric observation tensors
+//                                   (default: false)
+//   "rows"                    int   Number of rows (default: 6)
+//   "columns"                 int   Number of columns (default: 7)
+//   "x_in_row"                int   Number of cells in a row (default: 4)
 
 namespace open_spiel {
 namespace connect_four {
 
 // Constants.
+inline constexpr bool kDefaultEgocentricObsTensor = false;
 inline constexpr int kNumPlayers = 2;
-inline constexpr int kRows = 6;
-inline constexpr int kCols = 7;
-inline constexpr int kNumCells = kRows * kCols;
+inline constexpr int kDefaultNumRows = 6;
+inline constexpr int kDefaultNumCols = 7;
+inline constexpr int kDefaultXInRow = 4;
 inline constexpr int kCellStates =
     1 + kNumPlayers;  // player 0, player 1, empty
 
@@ -57,18 +69,69 @@ enum class CellState {
   kCross,
 };
 
+struct ConnectFourStructContents {
+  std::vector<std::vector<std::string>> board;
+  std::string current_player;
+  bool is_terminal;
+  std::string winner;
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE(ConnectFourStructContents, board,
+                                 current_player, is_terminal, winner);
+};
+
+SPIEL_DEFINE_STRUCT(ConnectFourStateStruct, StateStruct,
+                    ConnectFourStructContents);
+SPIEL_DEFINE_STRUCT(ConnectFourObservationStruct, ObservationStruct,
+                    ConnectFourStructContents);
+
+struct ConnectFourActionStruct : public ActionStruct {
+  int column;
+  SPIEL_STRUCT_BOILERPLATE(ConnectFourActionStruct, column);
+};
+
+struct ConnectFourGameParams : public GameParametersStruct {
+  int rows = kDefaultNumRows;
+  int columns = kDefaultNumCols;
+  int x_in_row = kDefaultXInRow;
+  bool egocentric_obs_tensor = kDefaultEgocentricObsTensor;
+
+  ConnectFourGameParams() { game_name = "connect_four"; }
+
+  nlohmann::json to_json_base() const override {
+    return nlohmann::json{{"game_name", game_name},
+                          {"rows", rows},
+                          {"columns", columns},
+                          {"x_in_row", x_in_row},
+                          {"egocentric_obs_tensor", egocentric_obs_tensor}};
+  }
+};
+
 // State of an in-play game.
 class ConnectFourState : public State {
  public:
   ConnectFourState(std::shared_ptr<const Game>);
   explicit ConnectFourState(std::shared_ptr<const Game> game,
                             const std::string& str);
+  // Construct from struct. If strict_validation is true (default), validates
+  // piece count balance (xs == os or xs == os + 1). If false, allows
+  // unreachable positions with imbalanced piece counts.
+  // All other validation (no gaps, valid cells, terminal consistency) is
+  // always performed regardless of strict_validation.
+  ConnectFourState(std::shared_ptr<const Game> game,
+                   const ConnectFourStateStruct& state_struct,
+                   bool strict_validation = true);
   ConnectFourState(const ConnectFourState& other) = default;
 
   Player CurrentPlayer() const override;
   std::vector<Action> LegalActions() const override;
   std::string ActionToString(Player player, Action action_id) const override;
   std::string ToString() const override;
+  std::unique_ptr<StateStruct> ToStruct() const override;
+  std::unique_ptr<ObservationStruct> ToObservationStruct(
+      Player player) const override;
+  std::unique_ptr<ActionStruct> ActionToStruct(Player player,
+                                               Action action_id) const override;
+  std::vector<Action> StructToActions(
+      const ActionStruct& action_struct) const override;
   bool IsTerminal() const override;
   std::vector<double> Returns() const override;
   std::string InformationStateString(Player player) const override;
@@ -98,25 +161,46 @@ class ConnectFourState : public State {
   bool IsFull() const;         // Is the board full?
   Player current_player_ = 0;  // Player zero goes first
   Outcome outcome_ = Outcome::kUnknown;
-  std::array<CellState, kNumCells> board_;
+  std::vector<CellState> board_;
 };
 
 // Game object.
 class ConnectFourGame : public Game {
  public:
   explicit ConnectFourGame(const GameParameters& params);
-  int NumDistinctActions() const override { return kCols; }
+  int NumDistinctActions() const override { return cols_; }
   std::unique_ptr<State> NewInitialState() const override {
     return std::unique_ptr<State>(new ConnectFourState(shared_from_this()));
+  }
+  std::unique_ptr<State> NewInitialState(
+      const ConnectFourStateStruct& state_struct,
+      bool strict_validation = true) const {
+    return std::unique_ptr<State>(new ConnectFourState(
+        shared_from_this(), state_struct, strict_validation));
+  }
+  std::unique_ptr<State> NewInitialState(
+      const nlohmann::json& json) const override {
+    return NewInitialState(ConnectFourStateStruct(json));
   }
   int NumPlayers() const override { return kNumPlayers; }
   double MinUtility() const override { return -1; }
   absl::optional<double> UtilitySum() const override { return 0; }
   double MaxUtility() const override { return 1; }
   std::vector<int> ObservationTensorShape() const override {
-    return {kCellStates, kRows, kCols};
+    return {kCellStates, rows_, cols_};
   }
-  int MaxGameLength() const override { return kNumCells; }
+  int MaxGameLength() const override { return rows_ * cols_; }
+
+  bool egocentric_obs_tensor() const { return egocentric_obs_tensor_; }
+  int rows() const { return rows_; }
+  int cols() const { return cols_; }
+  int x_in_row() const { return x_in_row_; }
+
+ private:
+  const int egocentric_obs_tensor_;
+  const int rows_;
+  const int cols_;
+  const int x_in_row_;
 };
 
 inline std::ostream& operator<<(std::ostream& stream, const CellState& state) {

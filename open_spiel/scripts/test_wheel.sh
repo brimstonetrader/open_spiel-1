@@ -23,7 +23,7 @@ then
   echo "Usage: test_wheel <mode (full|basic)> <project main dir> [python binary]"
   echo ""
   echo "Basic mode tests only the python functionaly (no ML libraries)"
-  echo "Full mode installs the extra ML libraries and the wheel. (requires Python >= 3.7 for JAX)."
+  echo "Full mode installs the extra ML libraries and the wheel. (requires Python >= 3.11 for JAX)."
   exit -1
 fi
 
@@ -32,14 +32,6 @@ PROJDIR=$2
 
 uname -a
 OS=`uname -a | awk '{print $1}'`
-
-# If it's full mode on Linux, we have to install Python 3.9 and make it the default.
-if [[ "$MODE" = "full" && "$OS" = "Linux" && "$OS_PYTHON_VERSION" = "3.9" ]]; then
-  echo "Linux detected and Python 3.9 requested. Installing Python 3.9 and setting as default."
-  sudo apt-get install python3.9 python3.9-dev
-  sudo update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
-  sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
-fi
 
 # Setting of PYBIN is complicated because of all the different environments this is run from.
 if [[ "$3" != "" ]]; then
@@ -50,7 +42,14 @@ fi
 
 PYBIN=`which $PYBIN`
 $PYBIN -m pip install --upgrade setuptools
-$PYBIN -m pip install --upgrade -r $PROJDIR/requirements.txt -q
+
+# Install requirements differently based on mode
+if [[ "$MODE" = "basic" ]]; then
+  $PYBIN -m pip install --upgrade -r $PROJDIR/requirements.txt -q
+else
+  # Full mode installs all requirements
+  $PYBIN -m pip install --upgrade -r $PROJDIR/requirements.txt -q
+fi
 
 if [[ "$MODE" = "full" ]]; then
   echo "Full mode. Installing Python extra deps libraries."
@@ -61,13 +60,35 @@ if [[ "$MODE" = "full" ]]; then
 fi
 
 if [[ "$MODE" = "full" ]]; then
-  if [[ "$OS" = "Linux" ]]; then
-    ${PYBIN} -m pip install wheelhouse/open_spiel-*-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  elif [[ "$OS" = "Darwin" && "$OS_PYTHON_VERSION" = "3.9" ]]; then
-    ${PYBIN} -m pip install wheelhouse/open_spiel-*-cp39-cp39-macosx_10_9_x86_64.whl
-  else
-    ${PYBIN} -m pip install wheelhouse/open_spiel-*-cp311-cp311-macosx_11_0_arm64.whl
+  # Special case: Skip full tests on macOS Python 3.13 (only cp314 wheel built)
+  if [[ "$OS" = "Darwin" && "$OS_PYTHON_VERSION" = "3.13" ]]; then
+    echo "Skipping full tests on macOS Python 3.13 (only Python 3.14 wheel available)"
+    exit 0
   fi
+
+  # Dynamically detect Python version and install matching wheel
+  PYTHON_VERSION=$(${PYBIN} --version 2>&1 | awk '{print $2}' | cut -d. -f1,2 | tr -d '.')
+  echo "Detected Python version: ${PYTHON_VERSION}, installing matching wheel for ${OS}"
+
+  if [[ "$OS" = "Linux" ]]; then
+    # Match both x86_64 and aarch64 wheels
+    WHEEL_FILE=$(ls wheelhouse/open_spiel-*-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux*.whl 2>/dev/null | head -1)
+  elif [[ "$OS" = "Darwin" ]]; then
+    WHEEL_FILE=$(ls wheelhouse/open_spiel-*-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-*.whl 2>/dev/null | head -1)
+  else
+    echo "ERROR: Unsupported OS: ${OS}"
+    exit 1
+  fi
+
+  if [[ -z "$WHEEL_FILE" ]]; then
+    echo "ERROR: No wheel found for Python ${PYTHON_VERSION} on ${OS}"
+    echo "Available wheels:"
+    ls wheelhouse/*.whl 2>/dev/null || echo "No wheels found in wheelhouse/"
+    exit 1
+  fi
+
+  echo "Installing wheel: $WHEEL_FILE"
+  ${PYBIN} -m pip install "$WHEEL_FILE"
 fi
 
 export OPEN_SPIEL_BUILDING_WHEEL="ON"

@@ -1,8 +1,12 @@
 set(GAME_SOURCES
   amazons/amazons.cc
   amazons/amazons.h
+  antichess/antichess.cc
+  antichess/antichess.h
   backgammon/backgammon.cc
   backgammon/backgammon.h
+  banqi/banqi.cc
+  banqi/banqi.h
   bargaining/bargaining.cc
   bargaining/bargaining.h
   bargaining/bargaining_instances1000.cc
@@ -26,6 +30,8 @@ set(GAME_SOURCES
   catch/catch.h
   checkers/checkers.cc
   checkers/checkers.h
+  chinese_checkers/chinese_checkers.cc
+  chinese_checkers/chinese_checkers.h
   chess/chess.cc
   chess/chess.h
   chess/chess_board.cc
@@ -50,6 +56,12 @@ set(GAME_SOURCES
   coordinated_mp/coordinated_mp.h
   crazy_eights/crazy_eights.cc
   crazy_eights/crazy_eights.h
+  crazyhouse/crazyhouse.cc
+  crazyhouse/crazyhouse.h
+  crazyhouse/crazyhouse_board.cc
+  crazyhouse/crazyhouse_board.h
+  crazyhouse/crazyhouse_common.cc
+  crazyhouse/crazyhouse_common.h
   cribbage/cribbage.cc
   cribbage/cribbage.h
   cursor_go/cursor_go.cc
@@ -88,6 +100,11 @@ set(GAME_SOURCES
   go/go.h
   go/go_board.cc
   go/go_board.h
+  go/sgf_game_loader.cc
+  go/sgf_game_loader.h
+  gomoku/gomoku.cc
+  gomoku/gomoku.h
+  gomoku/gomoku_grid.h
   goofspiel/goofspiel.cc
   goofspiel/goofspiel.h
   havannah/havannah.cc
@@ -106,12 +123,18 @@ set(GAME_SOURCES
   kuhn_poker/kuhn_poker.h
   laser_tag/laser_tag.cc
   laser_tag/laser_tag.h
+  latent_ttt/latent_ttt.cc
+  latent_ttt/latent_ttt.h
   leduc_poker/leduc_poker.cc
   leduc_poker/leduc_poker.h
+  leduc_poker/repeated_leduc_poker.cc
+  leduc_poker/repeated_leduc_poker.h
   lewis_signaling/lewis_signaling.cc
   lewis_signaling/lewis_signaling.h
   liars_dice/liars_dice.cc
   liars_dice/liars_dice.h
+  lines_of_action/lines_of_action.cc
+  lines_of_action/lines_of_action.h
   maedn/maedn.cc
   maedn/maedn.h
   mancala/mancala.cc
@@ -163,14 +186,22 @@ set(GAME_SOURCES
   phantom_ttt/phantom_ttt.h
   pig/pig.cc
   pig/pig.h
+  pokerkit_wrapper/pokerkit_wrapper_struct.h
+  repeated_pokerkit/repeated_pokerkit_struct.h
   quoridor/quoridor.cc
   quoridor/quoridor.h
   rbc/rbc.cc
   rbc/rbc.h
   sheriff/sheriff.cc
   sheriff/sheriff.h
+  shogi/shogi.cc
+  shogi/shogi.h
+  shogi/shogi_board.cc
+  shogi/shogi_board.h
   skat/skat.cc
   skat/skat.h
+  snake/snake.cc
+  snake/snake.h
   solitaire/solitaire.cc
   solitaire/solitaire.h
   spades/spades.cc
@@ -204,6 +235,10 @@ set(GAME_SOURCES
   ultimate_tic_tac_toe/ultimate_tic_tac_toe.cc
   y/y.cc
   y/y.h
+  xiangqi/xiangqi.cc
+  xiangqi/xiangqi.h
+  yacht/yacht.cc
+  yacht/yacht.h
 )
 
 if (${OPEN_SPIEL_BUILD_WITH_HANABI})
@@ -211,12 +246,16 @@ if (${OPEN_SPIEL_BUILD_WITH_HANABI})
 endif()
 if (${OPEN_SPIEL_BUILD_WITH_ACPC})
   set(GAME_SOURCES ${GAME_SOURCES} universal_poker/universal_poker.cc universal_poker/universal_poker.h)
+  set(GAME_SOURCES ${GAME_SOURCES} universal_poker/repeated_poker.cc universal_poker/repeated_poker.h)
 endif()
 
 
 add_library (games OBJECT ${GAME_SOURCES})
 
 target_include_directories (games PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories (games PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}../pybind11_abseil)
+target_include_directories (games PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}../pybind11_json)
+target_include_directories (games PUBLIC ${Python3_INCLUDE_DIRS})
 
 if (${OPEN_SPIEL_BUILD_WITH_HANABI})
   add_subdirectory(hanabi)
@@ -298,9 +337,17 @@ add_executable(amazons_test amazons/amazons_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(amazons_test amazons_test)
 
+add_executable(antichess_test antichess/antichess_test.cc ${OPEN_SPIEL_OBJECTS}
+        $<TARGET_OBJECTS:tests>)
+add_test(antichess_test antichess_test)
+
 add_executable(backgammon_test backgammon/backgammon_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(backgammon_test backgammon_test)
+
+add_executable(banqi_test banqi/banqi_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(banqi_test banqi_test)
 
 add_executable(bargaining_instance_generator bargaining/bargaining_instance_generator.cc
                ${OPEN_SPIEL_OBJECTS})
@@ -335,6 +382,10 @@ add_test(catch_test catch_test)
 add_executable(checkers_test checkers/checkers_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(checkers_test checkers_test)
+
+add_executable(chinese_checkers_test chinese_checkers/chinese_checkers_test.cc
+               ${OPEN_SPIEL_OBJECTS} $<TARGET_OBJECTS:tests>)
+add_test(chinese_checkers_test chinese_checkers_test)
 
 add_executable(chess_test chess/chess_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
@@ -375,6 +426,10 @@ add_executable(coordinated_mp_test coordinated_mp/coordinated_mp_test.cc ${OPEN_
         $<TARGET_OBJECTS:tests>
         $<TARGET_OBJECTS:algorithms>)
 add_test(coordinated_mp_test coordinated_mp_test)
+
+add_executable(crazyhouse_test crazyhouse/crazyhouse_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(crazyhouse_test crazyhouse_test)
 
 add_executable(crazy_eights_test crazy_eights/crazy_eights_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
@@ -462,9 +517,17 @@ add_executable(go_test go/go_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(go_test go_test)
 
+add_executable(sgf_game_loader_test go/sgf_game_loader_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(sgf_game_loader_test sgf_game_loader_test)
+
 add_executable(phantom_go_test phantom_go/phantom_go_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(phantom_go_test phantom_go_test)
+
+add_executable(gomoku_test gomoku/gomoku_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(gomoku_test gomoku_test)
 
 add_executable(goofspiel_test goofspiel/goofspiel_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
@@ -495,6 +558,10 @@ add_executable(kuhn_poker_test kuhn_poker/kuhn_poker_test.cc ${OPEN_SPIEL_OBJECT
                $<TARGET_OBJECTS:algorithms>)
 add_test(kuhn_poker_test kuhn_poker_test)
 
+add_executable(latent_ttt_test latent_ttt/latent_ttt_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(latent_ttt_test latent_ttt_test)
+
 add_executable(leduc_poker_test leduc_poker/leduc_poker_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>
                $<TARGET_OBJECTS:algorithms>)
@@ -508,6 +575,10 @@ add_executable(liars_dice_test liars_dice/liars_dice_test.cc ${OPEN_SPIEL_OBJECT
                $<TARGET_OBJECTS:tests>
                $<TARGET_OBJECTS:algorithms>)
 add_test(liars_dice_test liars_dice_test)
+
+add_executable(lines_of_action_test lines_of_action/lines_of_action_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(lines_of_action_test lines_of_action_test)
 
 add_executable(maedn_test maedn/maedn_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
@@ -592,6 +663,14 @@ add_executable(pig_test pig/pig_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(pig_test pig_test)
 
+add_executable(pokerkit_wrapper_struct_test pokerkit_wrapper/pokerkit_wrapper_struct_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(pokerkit_wrapper_struct_test pokerkit_wrapper_struct_test)
+
+add_executable(repeated_pokerkit_struct_test repeated_pokerkit/repeated_pokerkit_struct_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(repeated_pokerkit_struct_test repeated_pokerkit_struct_test)
+
 add_executable(quoridor_test quoridor/quoridor_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(quoridor_test quoridor_test)
@@ -600,13 +679,25 @@ add_executable(rbc_test rbc/rbc_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(rbc_test rbc_test)
 
+add_executable(repeated_leduc_poker_test leduc_poker/repeated_leduc_poker_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(repeated_leduc_poker_test repeated_leduc_poker_test)
+
 add_executable(sheriff_test sheriff/sheriff_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(sheriff_test sheriff_test)
 
+add_executable(shogi_test shogi/shogi_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(shogi_test shogi_test)
+
 add_executable(skat_test skat/skat_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(skat_test skat_test)
+
+add_executable(snake_test snake/snake_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(snake_test snake_test)
 
 add_executable(solitaire_test solitaire/solitaire_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
@@ -661,8 +752,20 @@ if (${OPEN_SPIEL_BUILD_WITH_ACPC})
           $<TARGET_OBJECTS:algorithms>)
   add_test(universal_poker_test universal_poker_test
            --subgames_data_dir=${CMAKE_CURRENT_SOURCE_DIR}/universal_poker/endgames)
+  add_executable(repeated_poker_test universal_poker/repeated_poker_test.cc ${OPEN_SPIEL_OBJECTS}
+          $<TARGET_OBJECTS:tests>
+          $<TARGET_OBJECTS:algorithms>)
+  add_test(repeated_poker_test repeated_poker_test)
 endif()
 
 add_executable(y_test y/y_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(y_test y_test)
+
+add_executable(xiangqi_test xiangqi/xiangqi_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(xiangqi_test xiangqi_test)
+
+add_executable(yacht_test yacht/yacht_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(yacht_test yacht_test)

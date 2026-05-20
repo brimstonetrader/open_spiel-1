@@ -13,11 +13,20 @@
 // limitations under the License.
 
 #include "open_spiel/games/gin_rummy/gin_rummy.h"
+#include <iostream>
+#include <memory>
+#include <ostream>
+#include <random>
+#include <string>
+#include <vector>
 
 #include "open_spiel/abseil-cpp/absl/algorithm/container.h"
+#include "open_spiel/json/include/nlohmann/json.hpp"
+#include "open_spiel/game_parameters.h"
 #include "open_spiel/games/gin_rummy/gin_rummy_utils.h"
 #include "open_spiel/observer.h"
 #include "open_spiel/spiel.h"
+#include "open_spiel/spiel_utils.h"
 #include "open_spiel/tests/basic_tests.h"
 
 namespace open_spiel {
@@ -134,9 +143,8 @@ void GameplayTest1() {
   GameParameters params;
   // Modify undercut bonus game parameter as an additional test.
   params["undercut_bonus"] = GameParameter(20);
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   initial_actions = {11, 4,  5, 6,  21, 22, 23, 12, 25, 38, 1,  14,
                      27, 40, 7, 20, 33, 8,  19, 13, 36, 52, 55, 11};
@@ -203,9 +211,8 @@ void GameplayTest1() {
 
 void GameplayTest2() {
   GameParameters params;
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   initial_actions = {1,  4,  5,  6,  17, 18, 19, 30, 31, 32, 2,  3,
                      16, 29, 43, 44, 45, 7,  20, 33, 0,  52, 55, 1};
@@ -268,9 +275,8 @@ void GameplayTest2() {
 // Potentially tricky corner case.
 void GameplayTest3() {
   GameParameters params;
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   initial_actions = {10, 11, 12, 22, 35, 48, 13, 26, 1, 40, 9,  8,
                      3,  16, 29, 42, 4,  17, 30, 43, 0, 52, 55, 1};
@@ -332,9 +338,8 @@ void WallTest() {
   GinRummyUtils utils = GinRummyUtils(kDefaultNumRanks, kDefaultNumSuits,
                                       kDefaultHandSize);
   GameParameters params;
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> legal_actions;
   std::vector<Action> initial_actions;
   initial_actions = {8,  9,  10, 11, 12, 13, 14, 15, 48, 49, 0,  1,  2,  3,
@@ -412,9 +417,8 @@ void WallTest() {
 // play each hand.
 void MaxGameLengthTest() {
   GameParameters params;
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   // Deal hands
   initial_actions = {0,  1,  2,  13, 14, 15, 26, 27, 28, 39, 9,
@@ -449,9 +453,8 @@ void MaxGameLengthTest() {
 void OklahomaTest() {
   GameParameters params;
   params["oklahoma"] = GameParameter(true);
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   initial_actions = {35, 37, 10, 11, 41, 14, 15, 16, 48, 49, 0, 1,
                      2,  3,  4,  5,  6,  7,  8,  51, 13, 54, 52};
@@ -540,14 +543,13 @@ void OklahomaTest() {
 // Basic Observer functionality test.
 void ObserverTest() {
   GameParameters params;
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
 
   std::shared_ptr<Observer> observer = game->MakeObserver(kDefaultObsType,
                                                           params);
   Observation observation = Observation(*game, observer);
 
-  std::unique_ptr<open_spiel::State> state = game->NewInitialState();
+  std::unique_ptr<State> state = game->NewInitialState();
   std::vector<Action> initial_actions;
   initial_actions = {1,  4,  5,  6,  17, 18, 19, 30, 31, 32, 2,  3,
                      16, 29, 43, 44, 45, 7,  20, 33, 0,  52, 55, 1};
@@ -561,6 +563,91 @@ void ObserverTest() {
     SPIEL_CHECK_EQ(observation.Tensor(), state->ObservationTensor(player));
     std::cout << state->InformationStateString(player) << std::endl;
   }
+}
+
+void KnownCardsTest() {
+  GameParameters params;
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
+  GinRummyState* gr_state = static_cast<GinRummyState*>(state.get());
+  std::vector<Action> initial_actions;
+  // Deal hands & first upcard
+  initial_actions = {0,  1,  2,  13, 14, 15, 26, 27, 28, 39,
+                     9, 10, 11, 12, 23, 24, 25, 36, 37, 38,
+                     40};
+  for (auto action : initial_actions) {
+    gr_state->ApplyAction(action);
+  }
+  gr_state->ApplyAction(52);  // Player 0 picks upcard 40
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[0], 40));
+  SPIEL_CHECK_FALSE(absl::c_linear_search(gr_state->KnownCards()[1], 0));
+  state->ApplyAction(0);   // Player 0 discards 0
+  state->ApplyAction(52);  // Player 1 picks upcard 0
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[0], 40));
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[1], 0));
+  state->ApplyAction(12);  // Player 1 discards 12
+  state->ApplyAction(52);  // Player 0 picks upcard 12
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[0], 40));
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[0], 12));
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[1], 0));
+  state->ApplyAction(40);  // Player 0 discards 40
+  SPIEL_CHECK_FALSE(absl::c_linear_search(gr_state->KnownCards()[0], 40));
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[0], 12));
+  SPIEL_CHECK_TRUE(absl::c_linear_search(gr_state->KnownCards()[1], 0));
+}
+
+void ResampleFromInfostateTest() {
+  int num_sims = 10;
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy");
+  std::mt19937 rng;
+  UniformProbabilitySampler sampler;
+  for (int i = 0; i < num_sims; ++i) {
+    std::unique_ptr<State> state = game->NewInitialState();
+    while (!state->IsTerminal()) {
+      if (!state->IsChanceNode()) {
+        for (int p = 0; p < state->NumPlayers(); ++p) {
+          std::unique_ptr<State> other_state =
+              state->ResampleFromInfostate(p, sampler);
+          SPIEL_CHECK_EQ(state->ObservationString(p),
+                         other_state->ObservationString(p));
+          SPIEL_CHECK_EQ(state->ObservationTensor(p),
+                         other_state->ObservationTensor(p));
+          SPIEL_CHECK_EQ(state->CurrentPlayer(), other_state->CurrentPlayer());
+        }
+      }
+      std::vector<Action> actions = state->LegalActions();
+      std::uniform_int_distribution<int> dis(0, actions.size() - 1);
+      Action action = actions[dis(rng)];
+      state->ApplyAction(action);
+    }
+  }
+}
+
+void ResampleFromInfostateKnownCardsTest() {
+  GameParameters params;
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
+  std::unique_ptr<State> state = game->NewInitialState();
+  std::vector<Action> initial_actions;
+  // Deal hands and first upcard
+  initial_actions = {0,  1,  2,  13, 14, 15, 26, 27, 28, 39, 9,
+                     10, 11, 12, 23, 24, 25, 36, 37, 38, 40};
+  for (auto action : initial_actions) {
+    state->ApplyAction(action);
+  }
+  // Player 0 passes on first upcard.
+  state->ApplyAction(kPassAction);
+  // Player 1 takes upcard (card 40).
+  state->ApplyAction(kDrawUpcardAction);
+  // Now card 40 is known to be in player 1's hand.
+  // Resample from player 0's perspective.
+  UniformProbabilitySampler sampler;
+  std::unique_ptr<State> resampled_state =
+      state->ResampleFromInfostate(0, sampler);
+  GinRummyState* resampled_gr_state =
+      static_cast<GinRummyState*>(resampled_state.get());
+
+  // Check that card 40 is in player 1's hand in the resampled state.
+  SPIEL_CHECK_TRUE(absl::c_linear_search(resampled_gr_state->Hands()[1], 40));
 }
 
 // TODO(jhtschultz) Add more extensive testing of parameterized deck size.
@@ -585,9 +672,62 @@ void DeckSizeTests() {
   params["num_ranks"] = GameParameter(10);
   params["num_suits"] = GameParameter(3);
   params["hand_size"] = GameParameter(7);
-  std::shared_ptr<const open_spiel::Game> game =
-      open_spiel::LoadGame("gin_rummy", params);
+  std::shared_ptr<const Game> game = LoadGame("gin_rummy", params);
   testing::RandomSimTest(*game, 10);
+}
+
+void TestStructs() {
+  auto game = LoadGame("gin_rummy");
+  auto state = game->NewInitialState();
+  // Apply some actions to get a non-initial state.
+  std::vector<Action> initial_actions = {
+      11, 4,  5, 6,  21, 22, 23, 12, 25, 38,  // P0 hand
+      1,  14, 27, 40, 7,  20, 33, 8,  19, 13,  // P1 hand
+      36                                      // upcard
+  };
+  for (auto action : initial_actions) state->ApplyAction(action);
+
+  GinRummyState* gr_state = static_cast<GinRummyState*>(state.get());
+  auto state_struct = gr_state->ToStruct();
+
+  // Test state/state_struct -> json string.
+  SPIEL_CHECK_EQ(state_struct->ToJson(), gr_state->ToJson());
+
+  // Check some fields in the struct
+  GinRummyStateStruct* gr_struct =
+      static_cast<GinRummyStateStruct*>(state_struct.get());
+  SPIEL_CHECK_EQ(gr_struct->phase, "FirstUpcard");
+  SPIEL_CHECK_EQ(gr_struct->current_player, "Player_0");
+  SPIEL_CHECK_EQ(gr_struct->stock_size, 31);
+  SPIEL_CHECK_EQ(gr_struct->upcard.value(), "Jd");
+  SPIEL_CHECK_EQ(gr_struct->hands[0].size(), 10);
+  SPIEL_CHECK_EQ(gr_struct->hands[1].size(), 10);
+
+  // Test json string -> state_struct
+  std::string state_json = gr_state->ToJson();
+  SPIEL_CHECK_EQ(nlohmann::json::parse(state_json).dump(),
+                 GinRummyStateStruct(state_json).ToJson());
+
+  auto obs_struct = gr_state->ToObservationStruct(0);
+
+  // Check fields in the observation struct for player 0.
+  GinRummyObservationStruct* gr_obs_struct =
+      static_cast<GinRummyObservationStruct*>(obs_struct.get());
+  SPIEL_CHECK_EQ(gr_obs_struct->phase, gr_struct->phase);
+  SPIEL_CHECK_EQ(gr_obs_struct->current_player, gr_struct->current_player);
+  SPIEL_CHECK_EQ(gr_obs_struct->stock_size, gr_struct->stock_size);
+  SPIEL_CHECK_EQ(gr_obs_struct->upcard, gr_struct->upcard);
+  SPIEL_CHECK_EQ(gr_obs_struct->hands[0], gr_struct->hands[0]);
+  SPIEL_CHECK_EQ(gr_obs_struct->deadwood[0], gr_struct->deadwood[0]);
+  SPIEL_CHECK_EQ(gr_obs_struct->hands[1].size(), 10);
+  SPIEL_CHECK_EQ(gr_obs_struct->hands[1][0], "XX");
+  SPIEL_CHECK_EQ(gr_obs_struct->deadwood[1], -1);
+  SPIEL_CHECK_EQ(gr_obs_struct->observing_player, 0);
+
+  // Test json string -> obs_struct
+  std::string obs_json = obs_struct->ToJson();
+  SPIEL_CHECK_EQ(nlohmann::json::parse(obs_json).dump(),
+                 GinRummyObservationStruct(obs_json).ToJson());
 }
 
 }  // namespace
@@ -604,6 +744,10 @@ int main(int argc, char** argv) {
   open_spiel::gin_rummy::WallTest();
   open_spiel::gin_rummy::OklahomaTest();
   open_spiel::gin_rummy::ObserverTest();
+  open_spiel::gin_rummy::KnownCardsTest();
   open_spiel::gin_rummy::DeckSizeTests();
+  open_spiel::gin_rummy::ResampleFromInfostateTest();
+  open_spiel::gin_rummy::ResampleFromInfostateKnownCardsTest();
+  open_spiel::gin_rummy::TestStructs();
   std::cout << "Gin rummy tests passed!" << std::endl;
 }

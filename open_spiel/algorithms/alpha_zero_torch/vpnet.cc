@@ -15,7 +15,10 @@
 #include "open_spiel/algorithms/alpha_zero_torch/vpnet.h"
 
 #include <torch/torch.h>
+#include <torch/types.h>
 
+#include <cstdint>
+#include <algorithm>
 #include <fstream>  // For ifstream/ofstream.
 #include <string>
 #include <vector>
@@ -148,47 +151,67 @@ std::vector<VPNetModel::InferenceOutputs> VPNetModel::Inference(
     const std::vector<InferenceInputs>& inputs) {
   int inference_batch_size = inputs.size();
 
+  // Format the data outside of torch. Random assignments can be very slow on
+  // torch::Tensor objects and this approach is _much_ faster.
+  std::vector<float> raw_observations(inference_batch_size * flat_input_size_);
+  std::vector<uint8_t> raw_legal_mask(inference_batch_size * num_actions_, 0);
+
+  for (int batch = 0; batch < inference_batch_size; ++batch) {
+    for (Action action : inputs[batch].legal_actions) {
+      raw_legal_mask[batch * num_actions_ + action] = 1;
+    }
+    std::copy(inputs[batch].observations.begin(),
+              inputs[batch].observations.end(),
+              raw_observations.begin() + (batch * flat_input_size_));
+  }
+
   // Torch tensors by default use a dense, row-aligned memory layout.
   //   - Their default data type is a 32-bit float
   //   - Use the byte data type for boolean
 
+  // Clone first to take ownership from the raw blob, then move to device.
+  // This avoids the previous pattern of .to(device).clone() which performed
+  // two allocations: one for the device transfer and one for the clone.
   torch::Tensor torch_inf_inputs =
-      torch::empty({inference_batch_size, flat_input_size_}, torch_device_);
-  torch::Tensor torch_inf_legal_mask = torch::full(
-      {inference_batch_size, num_actions_}, false,
-      torch::TensorOptions().dtype(torch::kByte).device(torch_device_));
+      torch::from_blob(raw_observations.data(),
+                       {inference_batch_size, flat_input_size_})
+          .clone()
+          .to(torch_device_);
+  torch::Tensor torch_inf_legal_mask =
+      torch::from_blob(raw_legal_mask.data(),
+                       {inference_batch_size, num_actions_},
+                       torch::TensorOptions().dtype(torch::kByte))
+          .clone()
+          .to(torch_device_);
 
-  for (int batch = 0; batch < inference_batch_size; ++batch) {
-    // Copy legal mask(s) to a Torch tensor.
-    for (Action action : inputs[batch].legal_actions) {
-      torch_inf_legal_mask[batch][action] = true;
-    }
-
-    // Copy the observation(s) to a Torch tensor.
-    for (int i = 0; i < inputs[batch].observations.size(); ++i) {
-      torch_inf_inputs[batch][i] = inputs[batch].observations[i];
-    }
-  }
-
-  // Run the inference.
+  // Run the inference with gradient tracking disabled.
+  // NoGradGuard prevents LibTorch from building the autograd computation
+  // graph, saving memory and compute since we never backprop through
+  // inference.
   model_->eval();
+  torch::NoGradGuard no_grad;
   std::vector<torch::Tensor> torch_outputs =
       model_(torch_inf_inputs, torch_inf_legal_mask);
 
-  torch::Tensor value_batch = torch_outputs[0];
-  torch::Tensor policy_batch = torch_outputs[1];
+  // Move outputs to CPU in a single transfer, then use accessors for
+  // zero-overhead element access. This replaces the previous per-element
+  // .item<>() pattern which triggered a GPU-to-CPU sync on every call.
+  torch::Tensor value_cpu = torch_outputs[0].to(torch::kCPU).contiguous();
+  torch::Tensor policy_cpu = torch_outputs[1].to(torch::kCPU).contiguous();
+
+  auto value_acc = value_cpu.accessor<float, 2>();
+  auto policy_acc = policy_cpu.accessor<float, 2>();
 
   // Copy the Torch tensor output to the appropriate structure.
   std::vector<InferenceOutputs> output;
   output.reserve(inference_batch_size);
   for (int batch = 0; batch < inference_batch_size; ++batch) {
-    double value = value_batch[batch].item<double>();
+    double value = static_cast<double>(value_acc[batch][0]);
 
     ActionsAndProbs state_policy;
     state_policy.reserve(inputs[batch].legal_actions.size());
     for (Action action : inputs[batch].legal_actions) {
-      state_policy.push_back(
-          {action, policy_batch[batch][action].item<float>()});
+      state_policy.push_back({action, policy_acc[batch][action]});
     }
 
     output.push_back({value, state_policy});
@@ -200,39 +223,48 @@ std::vector<VPNetModel::InferenceOutputs> VPNetModel::Inference(
 VPNetModel::LossInfo VPNetModel::Learn(const std::vector<TrainInputs>& inputs) {
   int training_batch_size = inputs.size();
 
+  std::vector<float> raw_train_inputs(training_batch_size * flat_input_size_);
+  std::vector<uint8_t> raw_legal_mask(training_batch_size * num_actions_, 0);
+  std::vector<float> raw_policy_targets(training_batch_size * num_actions_, 0);
+  std::vector<float> raw_value_targets(training_batch_size);
+
+  for (int batch = 0; batch < training_batch_size; ++batch) {
+    std::copy(inputs[batch].observations.begin(),
+              inputs[batch].observations.end(),
+              raw_train_inputs.begin() + (batch * flat_input_size_));
+    for (Action action : inputs[batch].legal_actions) {
+      raw_legal_mask[num_actions_ * batch + action] = 1;
+    }
+    for (const auto &[action, probability] : inputs[batch].policy) {
+      raw_policy_targets[num_actions_ * batch + action] = probability;
+    }
+    raw_value_targets[batch] = inputs[batch].value;
+  }
+
   // Torch tensors by default use a dense, row-aligned memory layout.
   //   - Their default data type is a 32-bit float
   //   - Use the byte data type for boolean
-
+  // Clone first to take ownership from the raw blob, then move to device.
   torch::Tensor torch_train_inputs =
-      torch::empty({training_batch_size, flat_input_size_}, torch_device_);
-  torch::Tensor torch_train_legal_mask = torch::full(
-      {training_batch_size, num_actions_}, false,
-      torch::TensorOptions().dtype(torch::kByte).device(torch_device_));
+      torch::from_blob(raw_train_inputs.data(),
+                       {training_batch_size, flat_input_size_})
+          .clone()
+          .to(torch_device_);
+  torch::Tensor torch_train_legal_mask =
+      torch::from_blob(raw_legal_mask.data(),
+                       {training_batch_size, num_actions_},
+                       torch::TensorOptions().dtype(torch::kByte))
+          .clone()
+          .to(torch_device_);
   torch::Tensor torch_policy_targets =
-      torch::zeros({training_batch_size, num_actions_}, torch_device_);
+      torch::from_blob(raw_policy_targets.data(),
+                       {training_batch_size, num_actions_})
+          .clone()
+          .to(torch_device_);
   torch::Tensor torch_value_targets =
-      torch::empty({training_batch_size, 1}, torch_device_);
-
-  for (int batch = 0; batch < training_batch_size; ++batch) {
-    // Copy the legal mask(s) to a Torch tensor.
-    for (Action action : inputs[batch].legal_actions) {
-      torch_train_legal_mask[batch][action] = true;
-    }
-
-    // Copy the observation(s) to a Torch tensor.
-    for (int i = 0; i < inputs[batch].observations.size(); ++i) {
-      torch_train_inputs[batch][i] = inputs[batch].observations[i];
-    }
-
-    // Copy the policy target(s) to a Torch tensor.
-    for (const auto& [action, probability] : inputs[batch].policy) {
-      torch_policy_targets[batch][action] = probability;
-    }
-
-    // Copy the value target(s) to a Torch tensor.
-    torch_value_targets[batch][0] = inputs[batch].value;
-  }
+      torch::from_blob(raw_value_targets.data(), {training_batch_size, 1})
+          .clone()
+          .to(torch_device_);
 
   // Run a training step and get the losses.
   model_->train();

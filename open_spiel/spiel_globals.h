@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef OPEN_SPIEL_SPIEL_CONSTANTS_H_
-#define OPEN_SPIEL_SPIEL_CONSTANTS_H_
+#ifndef OPEN_SPIEL_SPIEL_GLOBALS_H_
+#define OPEN_SPIEL_SPIEL_GLOBALS_H_
 
+#include <ostream>
+#include <string>
 #include "open_spiel/spiel_utils.h"
 
 namespace open_spiel {
 
 // Player ids are 0, 1, 2, ...
 // Negative numbers are used for various special values.
-enum PlayerId {
+enum class PlayerId : int {
   // Player 0 is always valid, and is used in single-player games.
   kDefaultPlayerId = 0,
   // The fixed player id for chance/nature.
@@ -35,6 +37,46 @@ enum PlayerId {
   // player id of a mean field node
   kMeanFieldPlayerId = -5
 };
+
+inline std::ostream& operator<<(std::ostream& os, PlayerId p) {
+  return os << static_cast<int>(p);
+}
+
+inline constexpr int kDefaultPlayerId =
+    static_cast<int>(PlayerId::kDefaultPlayerId);
+inline constexpr int kChancePlayerId =
+    static_cast<int>(PlayerId::kChancePlayerId);
+inline constexpr int kSimultaneousPlayerId =
+    static_cast<int>(PlayerId::kSimultaneousPlayerId);
+inline constexpr int kInvalidPlayer =
+    static_cast<int>(PlayerId::kInvalidPlayer);
+inline constexpr int kTerminalPlayerId =
+    static_cast<int>(PlayerId::kTerminalPlayerId);
+inline constexpr int kMeanFieldPlayerId =
+    static_cast<int>(PlayerId::kMeanFieldPlayerId);
+
+// Default string representation of player ids. Game implementations may
+// override this to provide more descriptive strings, e.g. "x" instead of
+// "Player_0" in tic_tac_toe.
+inline std::string DefaultPlayerString(int player_id) {
+  switch (player_id) {
+    case kChancePlayerId:
+      return "Chance";
+    case kSimultaneousPlayerId:
+      return "Simultaneous";
+    case kInvalidPlayer:
+      return "Invalid";
+    case kTerminalPlayerId:
+      return "Terminal";
+    case kMeanFieldPlayerId:
+      return "MeanField";
+    default:
+      if (player_id >= 0) {
+        return "Player_" + std::to_string(player_id);
+      }
+      SpielFatalError("Unrecognized PlayerId: " + std::to_string(player_id));
+  }
+}
 
 // Constant representing an invalid action.
 inline constexpr Action kInvalidAction = -1;
@@ -61,4 +103,4 @@ enum class TensorLayout {
 
 }  // namespace open_spiel
 
-#endif  // OPEN_SPIEL_SPIEL_CONSTANTS_H_
+#endif  // OPEN_SPIEL_SPIEL_GLOBALS_H_

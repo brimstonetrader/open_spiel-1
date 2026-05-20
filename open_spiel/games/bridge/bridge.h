@@ -75,7 +75,6 @@ inline constexpr int kPublicInfoTensorSize =
     + kNumPlayers;      // Plus trailing passes
 inline constexpr int kMaxAuctionLength =
     kNumBids * (1 + kNumPlayers * 2) + kNumPlayers;
-inline constexpr Player kFirstPlayer = 0;
 enum class Suit { kClubs = 0, kDiamonds = 1, kHearts = 2, kSpades = 3 };
 
 // State of a single trick.
@@ -102,7 +101,7 @@ class BridgeState : public State {
  public:
   BridgeState(std::shared_ptr<const Game> game, bool use_double_dummy_result,
               bool is_dealer_vulnerable, bool is_non_dealer_vulnerable,
-              int num_tricks);
+              Player dealer, int num_tricks_in_observation_);
   Player CurrentPlayer() const override;
   std::string ActionToString(Player player, Action action) const override;
   std::string ToString() const override;
@@ -178,6 +177,7 @@ class BridgeState : public State {
   }
   std::array<absl::optional<Player>, kNumCards> OriginalDeal() const;
   std::string FormatDeal() const;
+  std::string FormatDealer() const;
   std::string FormatVulnerability() const;
   std::string FormatAuction(bool trailing_query) const;
   std::string FormatPlay() const;
@@ -185,8 +185,9 @@ class BridgeState : public State {
   std::string FormatResult() const;
 
   const bool use_double_dummy_result_;
+  const Player dealer_;
   const bool is_vulnerable_[kNumPartnerships];
-  const int num_tricks_;
+  const int num_tricks_in_observation_;
 
   int num_passes_ = 0;  // Number of consecutive passes since the last non-pass.
   int num_declarer_tricks_ = 0;
@@ -215,14 +216,14 @@ class BridgeGame : public Game {
   std::unique_ptr<State> NewInitialState() const override {
     return std::unique_ptr<State>(new BridgeState(
         shared_from_this(), UseDoubleDummyResult(), IsDealerVulnerable(),
-        IsNonDealerVulnerable(), NumTricks()));
+        IsNonDealerVulnerable(), Dealer(), NumTricksInObservation()));
   }
   int NumPlayers() const override { return kNumPlayers; }
   double MinUtility() const override { return -kMaxScore; }
   double MaxUtility() const override { return kMaxScore; }
   absl::optional<double> UtilitySum() const override { return 0; }
 
-  static int GetPlayTensorSize(int num_tricks) {
+  static int GetPlayTensorSize(int num_tricks_in_observation) {
     return kNumBidLevels          // What the contract is
            + kNumDenominations    // What trumps are
            + kNumOtherCalls       // Undoubled / doubled / redoubled
@@ -230,19 +231,22 @@ class BridgeGame : public Game {
            + kNumVulnerabilities  // Vulnerability of the declaring side
            + kNumCards            // Our remaining cards
            + kNumCards            // Dummy's remaining cards
-           + num_tricks * kNumPlayers * kNumCards  // Number of played tricks
-           + kNumTricks   // Number of tricks we have won
-           + kNumTricks;  // Number of tricks they have won
+           + num_tricks_in_observation * kNumPlayers *
+                 kNumCards  // Number of played tricks to show
+           + kNumTricks     // Number of tricks we have won
+           + kNumTricks;    // Number of tricks they have won
   }
 
   std::vector<int> ObservationTensorShape() const override {
     return {kNumObservationTypes +
-            std::max(GetPlayTensorSize(NumTricks()), kAuctionTensorSize)};
+            std::max(GetPlayTensorSize(NumTricksInObservation()),
+                     kAuctionTensorSize)};
   }
 
     std::vector<int> InformationStateTensorShape() const override {
-    return {kNumObservationTypes +
-            std::max(GetPlayTensorSize(NumTricks()), kAuctionTensorSize)};
+      return {kNumObservationTypes +
+              std::max(GetPlayTensorSize(NumTricksInObservation()),
+                       kAuctionTensorSize)};
   }
 
   int MaxGameLength() const override {
@@ -264,6 +268,15 @@ class BridgeGame : public Game {
   int PrivateObservationTensorSize() const { return kNumCards; }
   int PublicObservationTensorSize() const { return kPublicInfoTensorSize; }
 
+  // Create an initial state for a given board number, as used in duplicate
+  // bridge: https://en.wikipedia.org/wiki/Duplicate_bridge
+  // This means the dealer and vulnerability are derived from the board number,
+  // and the deal is derived from the tournament seed and board number.
+  // The resultant state will have current player as the dealer, with no initial
+  // deal phase.
+  std::unique_ptr<State> NewDuplicateBridgeInitialState(int tournament_seed,
+                                                        int board_number) const;
+
  private:
   bool UseDoubleDummyResult() const {
     return ParameterValue<bool>("use_double_dummy_result", true);
@@ -274,7 +287,10 @@ class BridgeGame : public Game {
   bool IsNonDealerVulnerable() const {
     return ParameterValue<bool>("non_dealer_vul", false);
   }
-  int NumTricks() const { return ParameterValue<int>("num_tricks", 2); }
+  Player Dealer() const { return ParameterValue<Player>("dealer", 0); }
+  int NumTricksInObservation() const {
+    return ParameterValue<int>("num_tricks_in_observation", 2);
+  }
 };
 
 }  // namespace bridge

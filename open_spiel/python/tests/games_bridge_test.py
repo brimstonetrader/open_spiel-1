@@ -15,6 +15,7 @@
 """Tests for the game-specific functions for bridge."""
 
 import random
+import textwrap
 import timeit
 
 from absl.testing import absltest
@@ -213,13 +214,15 @@ class GamesBridgeTest(absltest.TestCase):
     def make_obs_copy():
       inputs = np.zeros(obs_shape)
       for i in range(batch_size):
-        inputs[i, :] = states[i].observation_tensor()
+        if not states[i].is_terminal():
+          inputs[i, :] = states[i].observation_tensor()
       return inputs
 
     def make_obs_inplace():
       inputs = np.zeros(obs_shape, np.float32)
       for i in range(batch_size):
-        states[i].write_observation_tensor(inputs[i])
+        if not states[i].is_terminal():
+          states[i].write_observation_tensor(inputs[i])
       return inputs
 
     repeat = 2
@@ -231,6 +234,30 @@ class GamesBridgeTest(absltest.TestCase):
     print(f'In-place {times.mean():.4}s, min {times.min():.4}s')
 
     np.testing.assert_array_equal(make_obs_copy(), make_obs_inplace())
+
+  def test_new_duplicate_bridge_initial_state(self):
+    game = pyspiel.load_game('bridge')
+    state = game.new_initial_state(tournament_seed=1234, board_number=7)
+    self.assertEqual(
+        str(state),
+        textwrap.dedent("""\
+          Dealer South
+          Vul: All
+                          ♠ J 7 3 2
+                          ♥ 3
+                          ♦ J 8 7 5
+                          ♣ A 10 7 4
+          ♠ A 9 8 6                     ♠ K 10 5
+          ♥ 8 5 4                       ♥ K Q J 10 6
+          ♦ 3                           ♦ Q 10 2
+          ♣ Q J 9 8 6                   ♣ K 2
+                          ♠ Q 4
+                          ♥ A 9 7 2
+                          ♦ A K 9 6 4
+                          ♣ 5 3
+          """),
+    )
+    self.assertEqual(state.current_player(), 2)
 
 
 if __name__ == '__main__':

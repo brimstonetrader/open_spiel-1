@@ -12,15 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+#include <exception>  // NOLINT
+#include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "open_spiel/abseil-cpp/absl/flags/flag.h"
+#include "open_spiel/abseil-cpp/absl/types/optional.h"
 #include "open_spiel/algorithms/matrix_game_utils.h"
 #include "open_spiel/algorithms/nfg_writer.h"
 #include "open_spiel/algorithms/tensor_game_utils.h"
 #include "open_spiel/canonical_game_strings.h"
 #include "open_spiel/game_parameters.h"
+#include "open_spiel/game_transforms/turn_based_simultaneous_game.h"
 #include "open_spiel/games/efg_game/efg_game.h"
 #include "open_spiel/games/efg_game/efg_game_data.h"
 #include "open_spiel/games/nfg_game/nfg_game.h"
@@ -28,22 +35,34 @@
 #include "open_spiel/normal_form_game.h"
 #include "open_spiel/observer.h"
 #include "open_spiel/python/pybind11/algorithms_corr_dist.h"
+#include "open_spiel/python/pybind11/algorithms_infostate_tree.h"
 #include "open_spiel/python/pybind11/algorithms_trajectories.h"
 #include "open_spiel/python/pybind11/bots.h"
+#include "open_spiel/python/pybind11/evaluation_elo.h"
 #include "open_spiel/python/pybind11/evaluation_sco.h"
 #include "open_spiel/python/pybind11/game_transforms.h"
 #include "open_spiel/python/pybind11/games_backgammon.h"
 #include "open_spiel/python/pybind11/games_bargaining.h"
 #include "open_spiel/python/pybind11/games_blackjack.h"
 #include "open_spiel/python/pybind11/games_bridge.h"
+#include "open_spiel/python/pybind11/games_catch.h"
 #include "open_spiel/python/pybind11/games_chess.h"
 #include "open_spiel/python/pybind11/games_colored_trails.h"
+#include "open_spiel/python/pybind11/games_connect_four.h"
+#include "open_spiel/python/pybind11/games_crazy_eights.h"
+#include "open_spiel/python/pybind11/games_crazyhouse.h"
 #include "open_spiel/python/pybind11/games_dots_and_boxes.h"
 #include "open_spiel/python/pybind11/games_euchre.h"
 #include "open_spiel/python/pybind11/games_gin_rummy.h"
+#include "open_spiel/python/pybind11/games_go.h"
+#include "open_spiel/python/pybind11/games_gomoku.h"
+#include "open_spiel/python/pybind11/games_hearts.h"
 #include "open_spiel/python/pybind11/games_kuhn_poker.h"
 #include "open_spiel/python/pybind11/games_leduc_poker.h"
 #include "open_spiel/python/pybind11/games_negotiation.h"
+#include "open_spiel/python/pybind11/games_pokerkit_wrapper.h"
+#include "open_spiel/python/pybind11/games_repeated_pokerkit.h"
+#include "open_spiel/python/pybind11/games_shogi.h"
 #include "open_spiel/python/pybind11/games_spades.h"
 #include "open_spiel/python/pybind11/games_tarok.h"
 #include "open_spiel/python/pybind11/games_tic_tac_toe.h"
@@ -57,11 +76,15 @@
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_globals.h"
 #include "open_spiel/spiel_utils.h"
+#include "open_spiel/tensor_game.h"
 #include "open_spiel/tests/basic_tests.h"
+#include "open_spiel/utils/status.h"
+#include "open_spiel/pybind11_json/include/pybind11_json/pybind11_json.hpp"
 
 // Includes needed for absl::optional.
 #include "pybind11/include/pybind11/detail/common.h"
 #include "pybind11_abseil/absl_casters.h"
+#include "pybind11_abseil/status_casters.h"
 
 // List of optional python submodules.
 #if OPEN_SPIEL_BUILD_WITH_GAMUT
@@ -71,8 +94,11 @@
 #include "open_spiel/bots/xinxin/xinxin_pybind11.h"
 #endif
 #if OPEN_SPIEL_BUILD_WITH_ACPC
+#include "open_spiel/python/pybind11/games_repeated_poker.h"
 #include "open_spiel/python/pybind11/games_universal_poker.h"
 #endif
+
+#define PYSPIEL_VERSION "1.6.14"
 
 // Flags governing Open Spiel behaviour
 ABSL_FLAG(bool, log_exceptions_to_stderr, true,
@@ -106,9 +132,33 @@ class SpielException : public std::exception {
   std::string message_;
 };
 
+static py::object CreatePlayerIdIntEnum(py::module_ m) {
+  py::object enum_mod = py::module_::import("enum");
+  py::object IntEnum  = enum_mod.attr("IntEnum");
+  std::string modname = py::str(m.attr("__name__"));
+
+  py::dict members;
+  members["DEFAULT_PLAYER_ID"] =
+      py::int_(open_spiel::kDefaultPlayerId);
+  members["INVALID"] = py::int_(open_spiel::kInvalidPlayer);
+  members["TERMINAL"] = py::int_(open_spiel::kTerminalPlayerId);
+  members["CHANCE"] = py::int_(open_spiel::kChancePlayerId);
+  members["MEAN_FIELD"] = py::int_(open_spiel::kMeanFieldPlayerId);
+  members["SIMULTANEOUS"] =
+      py::int_(open_spiel::kSimultaneousPlayerId);
+
+  py::object PlayerId = IntEnum("PlayerId", members,
+                                py::arg("module") = modname);
+  m.attr("PlayerId") = PlayerId;
+  return PlayerId;
+}
+
 // Definition of our Python module.
 PYBIND11_MODULE(pyspiel, m) {
   m.doc() = "Open Spiel";
+  m.attr("__version__") = PYSPIEL_VERSION;
+
+  m.attr("PlayerId") = CreatePlayerIdIntEnum(m);
 
   m.def("game_parameters_from_string", GameParametersFromString,
         "Parses a string as a GameParameter dictionary.");
@@ -142,6 +192,21 @@ PYBIND11_MODULE(pyspiel, m) {
       .value("DECISION", open_spiel::StateType::kDecision)
       .value("MEAN_FIELD", open_spiel::StateType::kMeanField)
       .export_values();
+
+  py::enum_<open_spiel::StatusValue>(m, "StatusValue")
+      .value("OK_STATUS", open_spiel::StatusValue::kOk)
+      .value("ERROR_STATUS", open_spiel::StatusValue::kError)
+      .export_values();
+
+  py::class_<open_spiel::Status>(m, "Status")
+      .def(py::init<open_spiel::StatusValue, std::string>(),
+           py::arg("status_value"),
+           py::arg("message"))
+      .def("ok", &open_spiel::Status::ok)
+      .def("message", &open_spiel::Status::message)
+      .def("to_string", &open_spiel::Status::ToString)
+      .def("__str__", &open_spiel::Status::ToString)
+      .def("__repr__", &open_spiel::Status::ToString);
 
   py::class_<GameType> game_type(m, "GameType");
   game_type
@@ -230,14 +295,6 @@ PYBIND11_MODULE(pyspiel, m) {
       .value("REWARDS", GameType::RewardModel::kRewards)
       .value("TERMINAL", GameType::RewardModel::kTerminal);
 
-  py::enum_<open_spiel::PlayerId>(m, "PlayerId")
-      .value("DEFAULT_PLAYER_ID", open_spiel::kDefaultPlayerId)
-      .value("INVALID", open_spiel::kInvalidPlayer)
-      .value("TERMINAL", open_spiel::kTerminalPlayerId)
-      .value("CHANCE", open_spiel::kChancePlayerId)
-      .value("MEAN_FIELD", open_spiel::kMeanFieldPlayerId)
-      .value("SIMULTANEOUS", open_spiel::kSimultaneousPlayerId);
-
   py::class_<GameInfo> game_info(m, "GameInfo");
   game_info
       .def(py::init<int, int, int, double, double, absl::optional<double>,
@@ -255,6 +312,18 @@ PYBIND11_MODULE(pyspiel, m) {
       .def_readonly("utility_sum", &GameInfo::utility_sum)
       .def_readonly("max_game_length", &GameInfo::max_game_length);
 
+  py::class_<SpielStruct> spiel_struct(m, "SpielStruct");
+  spiel_struct.def("to_json", &SpielStruct::ToJson);
+
+  py::class_<StateStruct, SpielStruct>(m, "StateStruct");
+
+  py::class_<ObservationStruct, SpielStruct>(m, "ObservationStruct");
+
+  py::class_<ActionStruct, SpielStruct>(m, "ActionStruct");
+
+  py::class_<GameParametersStruct, SpielStruct>(m, "GameParametersStruct")
+      .def_readwrite("game_name", &GameParametersStruct::game_name);
+
   m.attr("INVALID_ACTION") = py::int_(open_spiel::kInvalidAction);
 
   py::enum_<open_spiel::TensorLayout>(m, "TensorLayout")
@@ -271,8 +340,13 @@ PYBIND11_MODULE(pyspiel, m) {
       .def("current_player", &State::CurrentPlayer)
       .def("apply_action", &State::ApplyAction)
       .def("apply_action_with_legality_check",
-           py::overload_cast<Action>(
-               &State::ApplyActionWithLegalityCheck))
+           py::overload_cast<Action>(&State::ApplyActionWithLegalityCheck))
+      .def("apply_actions", &State::ApplyActions)
+      .def("apply_actions_with_legality_checks",
+           &State::ApplyActionsWithLegalityChecks)
+      .def("validate_action_struct", &State::ValidateActionStruct)
+      .def("apply_action_struct", &State::ApplyActionStruct)
+      .def("undo_action", &State::UndoAction)
       .def("legal_actions",
            (std::vector<open_spiel::Action>(State::*)(int) const) &
                State::LegalActions)
@@ -292,11 +366,34 @@ PYBIND11_MODULE(pyspiel, m) {
                State::StringToAction)
       .def("string_to_action",
            (Action(State::*)(const std::string&) const) & State::StringToAction)
+      .def("action_to_struct",
+           (std::unique_ptr<ActionStruct>(State::*)(Player, Action) const) &
+               State::ActionToStruct)
+      .def("action_to_struct",
+           (std::unique_ptr<ActionStruct>(State::*)(Action) const) &
+               State::ActionToStruct)
+      .def("struct_to_actions", &State::StructToActions)
+      .def(
+          "actions_to_struct",
+          [](const State& state, Player player,
+             const std::vector<Action>& actions) {
+            return state.ActionsToStruct(player, absl::MakeSpan(actions));
+          },
+          py::arg("player"), py::arg("actions"))
+      .def(
+          "actions_to_struct",
+          [](const State& state, const std::vector<Action>& actions) {
+            return state.ActionsToStruct(absl::MakeSpan(actions));
+          },
+          py::arg("actions"))
       .def("__str__", &State::ToString)
       .def("__repr__", &State::ToString)
       .def("to_string", &State::ToString)
+      .def("to_struct", &State::ToStruct)
+      .def("to_json", &State::ToJson)
       .def("is_terminal", &State::IsTerminal)
       .def("is_initial_state", &State::IsInitialState)
+      .def("is_initial_non_chance_state", &State::IsInitialNonChanceState)
       .def("move_number", &State::MoveNumber)
       .def("rewards", &State::Rewards)
       .def("returns", &State::Returns)
@@ -326,18 +423,23 @@ PYBIND11_MODULE(pyspiel, m) {
            (std::vector<float>(State::*)(int) const) & State::ObservationTensor)
       .def("observation_tensor",
            (std::vector<float>(State::*)() const) & State::ObservationTensor)
+      .def("to_observation_struct",
+           (std::unique_ptr<ObservationStruct>(State::*)(Player) const) &
+               State::ToObservationStruct,
+           py::arg("player"))
+      .def("to_observation_struct",
+           (std::unique_ptr<ObservationStruct>(State::*)() const) &
+               State::ToObservationStruct)
       .def("clone", &State::Clone)
       .def("child", &State::Child)
-      .def("undo_action", &State::UndoAction)
-      .def("apply_actions", &State::ApplyActions)
-      .def("apply_actions_with_legality_checks",
-           &State::ApplyActionsWithLegalityChecks)
       .def("num_distinct_actions", &State::NumDistinctActions)
       .def("num_players", &State::NumPlayers)
       .def("chance_outcomes", &State::ChanceOutcomes)
       .def("get_game", &State::GetGame)
       .def("get_type", &State::GetType)
       .def("serialize", &State::Serialize)
+      .def("starting_state", &State::StartingState)
+      .def("starting_state_str", &State::StartingStateStr)
       .def("resample_from_infostate", &State::ResampleFromInfostate)
       .def(py::pickle(              // Pickle support
           [](const State& state) {  // __getstate__
@@ -350,7 +452,11 @@ PYBIND11_MODULE(pyspiel, m) {
           }))
       .def("distribution_support", &State::DistributionSupport)
       .def("update_distribution", &State::UpdateDistribution)
-      .def("mean_field_population", &State::MeanFieldPopulation);
+      .def("mean_field_population", &State::MeanFieldPopulation)
+      .def("to_dict", [](const State& state) {
+        // Automatically casted to py::dict using pybind11_json.
+        return state.ToStruct()->to_json_base();
+      });
 
   py::classh<Game, PyGame> game(m, "Game");
   game.def(py::init<GameType, GameInfo, GameParameters>())
@@ -362,6 +468,10 @@ PYBIND11_MODULE(pyspiel, m) {
       .def("new_initial_state",
            (std::unique_ptr<State>(open_spiel::Game::*)(
                                    const std::string&) const)
+           &Game::NewInitialState)
+      .def("new_initial_state",
+           (std::unique_ptr<State>(open_spiel::Game::*)(
+                                   const nlohmann::json&) const)
            &Game::NewInitialState)
       .def("new_initial_state_for_population",
            &Game::NewInitialStateForPopulation)
@@ -386,6 +496,8 @@ PYBIND11_MODULE(pyspiel, m) {
       .def("max_chance_nodes_in_history", &Game::MaxChanceNodesInHistory)
       .def("max_move_number", &Game::MaxMoveNumber)
       .def("max_history_length", &Game::MaxHistoryLength)
+      .def("serialize", &Game::Serialize)
+      .def("to_string", &Game::ToString)
       .def("make_observer",
            [](std::shared_ptr<const Game> game, IIGObservationType iig_obs_type,
               const GameParameters& params) {
@@ -425,6 +537,23 @@ PYBIND11_MODULE(pyspiel, m) {
             return std::const_pointer_cast<NormalFormGame>(
                 std::static_pointer_cast<const NormalFormGame>(LoadGame(data)));
           }));
+
+  // Put this here rather than in game_transforms.cc because it depends on
+  // State, which is defined above.
+  py::classh<TurnBasedSimultaneousState> tbs_state(m,
+      "TurnBasedSimultaneousState", state);
+  tbs_state.def("simultaneous_game_state",
+                &TurnBasedSimultaneousState::SimultaneousGameState,
+                py::return_value_policy::reference)
+      .def(py::pickle(              // Pickle support
+        [](const TurnBasedSimultaneousState& state) {  // __getstate__
+          return SerializeGameAndState(*state.GetGame(), state);
+        },
+        [](const std::string& data) {  // __setstate__
+          auto state = DeserializeGameAndState(data).second;
+          auto pydict = PyDict(*state);
+          return std::make_pair(std::move(state), pydict);
+        }));
 
   py::classh<MatrixGame> matrix_game(m, "MatrixGame", normal_form_game);
   matrix_game
@@ -559,6 +688,11 @@ PYBIND11_MODULE(pyspiel, m) {
       },
       "Creates an arbitrary matrix game from dimensions and utilities.");
 
+  m.def("ok_status", &open_spiel::OkStatus, "Returns an OkStatus.");
+
+  // Args: message (string)
+  m.def("error_status", &open_spiel::ErrorStatus, "Returns an ErrorStatus.");
+
   m.def("game_to_nfg_string", open_spiel::GameToNFGString,
         "Get the Gambit .nfg text for a normal-form game.");
 
@@ -572,6 +706,22 @@ PYBIND11_MODULE(pyspiel, m) {
             &open_spiel::LoadGame),
         "Returns a new game object for the specified short name using given "
         "parameters");
+
+  m.def("load_game",
+        py::overload_cast<const GameParametersStruct&>(&open_spiel::LoadGame),
+        "Returns a new game object from a GameParametersStruct");
+
+  m.def("load_games",
+        py::overload_cast<const std::string&, const std::string&>(
+          &open_spiel::LoadGames),
+        py::arg("multi_game_string"),
+        py::arg("separator") = "/",
+        "Returns a list of game objects for the specified multigame string");
+
+  m.def("load_game_from_json", &open_spiel::LoadGameFromJson,
+        "Load a game from a JSON string containing 'game_name' and optional "
+        "parameters. Example: load_game_from_json('{\"game_name\": "
+        "\"tic_tac_toe\"}')");
 
   m.def("load_matrix_game", open_spiel::algorithms::LoadMatrixGame,
         "Loads a game as a matrix game (will fail if not a matrix game.");
@@ -618,6 +768,12 @@ PYBIND11_MODULE(pyspiel, m) {
       "A general implementation of deserialization of a game and state "
       "string serialized by serialize_game_and_state.");
 
+  m.def("deserialize_game",
+      [](const std::string& data) {
+        return open_spiel::DeserializeGame(data);
+      },
+      "A general implementation of deserialization of a game.");
+
   m.def("register_game", RegisterPyGame,
         "Register a Python game implementation");
 
@@ -627,7 +783,21 @@ PYBIND11_MODULE(pyspiel, m) {
         py::arg("state_checker_fn") =
             py::cpp_function(&testing::DefaultStateChecker),
         py::arg("mean_field_population") = -1, py::arg("observer") = nullptr,
+        py::arg("specific_initial_state") = nullptr,
         "Run the C++ tests on a game");
+
+  // Returns a tuple of (action, probability)
+  m.def("sample_action",
+        [](const ActionsAndProbs& actions_and_probs, double z) {
+          return open_spiel::SampleAction(actions_and_probs, z);
+        },
+        "Samples an action given a random number z in [0, 1).");
+
+  m.def("random_sim_test_with_specific_initial_state",
+        testing::RandomSimTestWithSpecificInitialState, py::arg("game"),
+        py::arg("num_sims"), py::arg("specific_initial_state"),
+        py::arg("serialize") = true,
+        "Run the C++ tests on a game with a specific initial state.");
 
   m.def("build_state_from_history_string", BuildStateFromHistoryString,
         "Builds a state from a game string and history string.",
@@ -644,34 +814,50 @@ PYBIND11_MODULE(pyspiel, m) {
     throw SpielException(string);
   });
   py::register_exception<SpielException>(m, "SpielError", PyExc_RuntimeError);
+  // This exception is part of the infoset_tree bindings.
+  py::register_exception<ForbiddenException>(m, "ForbiddenError",
+                                             PyExc_RuntimeError);
 
   // Register other bits of the API.
-  init_pyspiel_bots(m);                   // Bots and bot-related algorithms.
-  init_pyspiel_policy(m);           // Policies and policy-related algorithms.
+  init_pyspiel_bots(m);                     // Bots and bot-related algorithms.
+  init_pyspiel_policy(m);                   // Policies and related algorithms.
   init_pyspiel_algorithms_corr_dist(m);     // Correlated eq. distance funcs
   init_pyspiel_algorithms_trajectories(m);  // Trajectories.
+  init_pyspiel_evaluation_elo(m);           // Elo rating system.
   init_pyspiel_evaluation_sco(m);           // Soft Condorcet Optimization.
   init_pyspiel_game_transforms(m);          // Game transformations.
-  init_pyspiel_games_backgammon(m);         // Backgammon game.
-  init_pyspiel_games_bargaining(m);         // Bargaining game.
-  init_pyspiel_games_blackjack(m);          // Blackjack game.
-  init_pyspiel_games_bridge(m);  // Game-specific functions for bridge.
-  init_pyspiel_games_chess(m);   // Chess game.
-  init_pyspiel_games_colored_trails(m);   // Colored Trails game.
-  init_pyspiel_games_dots_and_boxes(m);   // Dots-and-Boxes game.
-  init_pyspiel_games_euchre(m);  // Game-specific functions for euchre.
-  init_pyspiel_games_gin_rummy(m);  // Game-specific functions for gin_rummy.
-  init_pyspiel_games_kuhn_poker(m);   // Kuhn Poker game.
-  init_pyspiel_games_leduc_poker(m);  // Leduc poker game.
-  init_pyspiel_games_negotiation(m);  // Negotiation game.
-  init_pyspiel_games_spades(m);       // Game-specific functions for spades.
-  init_pyspiel_games_tarok(m);   // Game-specific functions for tarok.
-  init_pyspiel_games_tic_tac_toe(m);  // Tic-Tac-Toe game.
-  init_pyspiel_games_tiny_bridge(
-      m);                            // Game-specific functions for tiny_bridge.
-  init_pyspiel_games_trade_comm(m);  // Game-specific functions for trade_comm.
-  init_pyspiel_observer(m);      // Observers and observations.
-  init_pyspiel_utils(m);         // Utilities.
+  // Game-specific functions.
+  init_pyspiel_games_backgammon(m);
+  init_pyspiel_games_bargaining(m);
+  init_pyspiel_games_blackjack(m);
+  init_pyspiel_games_bridge(m);
+  init_pyspiel_games_catch(m);
+  init_pyspiel_games_chess(m);
+  init_pyspiel_games_crazyhouse(m);
+  init_pyspiel_games_colored_trails(m);
+  init_pyspiel_games_connect_four(m);
+  init_pyspiel_games_crazy_eights(m);
+  init_pyspiel_games_dots_and_boxes(m);
+  init_pyspiel_games_euchre(m);
+  init_pyspiel_games_gin_rummy(m);
+  init_pyspiel_games_go(m);
+  init_pyspiel_games_gomoku(m);
+  init_pyspiel_games_hearts(m);
+  init_pyspiel_games_kuhn_poker(m);
+  init_pyspiel_games_leduc_poker(m);
+  init_pyspiel_games_negotiation(m);
+  init_pyspiel_games_shogi(m);
+  init_pyspiel_games_spades(m);
+  init_pyspiel_games_tarok(m);
+  init_pyspiel_games_tic_tac_toe(m);
+  init_pyspiel_games_tiny_bridge(m);
+  init_pyspiel_games_trade_comm(m);
+  bind_pokerkit_state_struct(m);           // C++ struct for a Python game.
+  bind_repeated_pokerkit_state_struct(m);  // C++ struct for a Python game.
+  init_pyspiel_observer(m);                 // Observers and observations.
+  init_pyspiel_utils(m);                    // Utilities.
+  init_pyspiel_infostate_tree(
+      m);  // Infostate-Tree and associated classes (Id etc.)
 
   // List of optional python submodules.
 #if OPEN_SPIEL_BUILD_WITH_GAMUT
@@ -682,6 +868,7 @@ PYBIND11_MODULE(pyspiel, m) {
 #endif
 #if OPEN_SPIEL_BUILD_WITH_ACPC
   init_pyspiel_games_universal_poker(m);  // Universal poker game.
+  init_pyspiel_games_repeated_poker(m);  // Repeated poker game.
 #endif
 }  // NOLINT
 
