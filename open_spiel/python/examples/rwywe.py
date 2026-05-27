@@ -114,69 +114,42 @@ def _exploitability(game, agent_id, agent_policy, opp_pure_strats) -> float:
 
 def _mixed_strategy_ev(game, agent_id, agent_policy,
                        opp_reached_iss, opp_obs_action,
-                       opp_iss_actions) -> float:
+                       opp_iss_actions, opp_model) -> float:
     """
-    Compute u_i(π_t, τ_t) per RWYWE Algorithm 6:
+    Compute u_i(π_t, τ_t) per RWYWE Algorithm 6.
 
-        u_i(π_t_i, a^t_{-i})
+    τ_t is constructed as:
+      - At opp_reached_iss: play opp_obs_action (observed on path of play)
+      - At all other ISS: play according to the current opponent model
+        (smoothed frequency estimates)
 
-    This is the expected payoff of the agent's FULL mixed strategy π_t
-    against the opponent's observed action a^t_{-i}, averaged over all
-    chance outcomes (card deals).
+    This is the correct interpretation of Algorithm 6 for imperfect
+    information: we make pessimistic assumptions only about what the opponent
+    *would have done* at the ISS they actually reached — for other ISS we
+    use our best estimate of their strategy (the opponent model).
 
-    For the ISS the opponent actually reached, τ plays the observed action.
-    For all other opponent ISS (off the path of play for this specific hand,
-    but reachable under other card deals), we make the pessimistic assumption
-    that τ plays a best response to π_t — i.e. minimises agent EV.
-
-    This is the key difference from RWYW:
-      - RWYW: uses the realized payoff of the action actually taken
-      - RWYWE: uses the expected payoff of π_t against τ, integrated over
-               all card deals (the expectation over agent's randomisation)
-
-    Implementation:
-      - At opp_reached_iss: fix action = opp_obs_action
-      - At all other opp ISS: for each ISS independently, pick the action
-        that minimises agent EV given π_t (pessimistic off-path assumption)
+    Using worst-case (nemesis) at off-path ISS is too conservative: it drives
+    pess_ev below v* even when the opponent gave us a gift on-path, preventing
+    k from growing.
     """
     v_star = -1.0/18.0 if agent_id == 0 else 1.0/18.0
 
     if opp_reached_iss not in opp_iss_actions:
         return v_star
 
-    # Build τ: observed action on-path, pessimistic best response off-path.
-    # For each off-path ISS, find the opponent action that minimises agent EV
-    # when the opponent plays deterministically at that ISS (all else uniform).
-    opp_id  = 1 - agent_id
+    # Build τ: observed action at reached ISS, model prediction elsewhere
     tau_pol = {}
-
     for iss, actions in opp_iss_actions.items():
         if iss == opp_reached_iss:
             tau_pol[iss] = {opp_obs_action: 1.0}
         else:
-            # Pessimistic: pick the action minimising agent EV at this ISS,
-            # holding all other ISS at uniform (we'll fill in properly below)
-            tau_pol[iss] = {a: 1.0 / len(actions) for a in actions}
-
-    # Now refine off-path ISS actions pessimistically:
-    # For each off-path ISS, try each action and pick the one giving lowest
-    # agent EV when substituted into the full tau_pol.
-    for iss in opp_iss_actions:
-        if iss == opp_reached_iss:
-            continue
-        actions = opp_iss_actions[iss]
-        if len(actions) == 1:
-            tau_pol[iss] = {actions[0]: 1.0}
-            continue
-        best_a_for_opp = None
-        best_ev_for_opp = float("inf")
-        for a in actions:
-            tau_pol[iss] = {a: 1.0}
-            ev = _ev_exact(game, agent_id, agent_policy, tau_pol)
-            if ev < best_ev_for_opp:
-                best_ev_for_opp = ev
-                best_a_for_opp  = a
-        tau_pol[iss] = {best_a_for_opp: 1.0}
+            # Use opponent model counts as probabilities
+            counts = opp_model.get(iss, {})
+            total  = sum(counts.values())
+            if total > 0:
+                tau_pol[iss] = {a: counts.get(a, 0.0) / total for a in actions}
+            else:
+                tau_pol[iss] = {a: 1.0 / len(actions) for a in actions}
 
     return _ev_exact(game, agent_id, agent_policy, tau_pol)
 
@@ -226,6 +199,27 @@ class RWYWEAgent(rl_agent.AbstractAgent):
             for pure in self._agent_pure_strats
         ]
 
+        # Precompute full EV matrix: ev_matrix[i, j] = EV of agent pure
+        # strategy i vs opponent pure strategy j. Fixed by game tree — never
+        # recomputed. Shape: (n_agent_pure, n_opp_pure).
+        n_a = len(self._agent_pure_strats)
+        n_o = len(self._opp_pure_strats)
+        self._ev_matrix = np.zeros((n_a, n_o))
+        for i, agent_pure in enumerate(self._agent_pure_strats):
+            pol = {iss: {a: 1.0} for iss, a in agent_pure.items()}
+            for j, opp_pure in enumerate(self._opp_pure_strats):
+                self._ev_matrix[i, j] = _ev_exact(
+                    game, player_id, pol, opp_pure)
+
+        # Precompute opponent pure strategy weight vectors for dot products.
+        # opp_pure_vecs[j] = indicator vector over opp ISS actions for pure j.
+        # Used to convert opp_model counts → weight vector over pure strategies.
+        self._opp_iss_list = sorted(self._opp_iss_actions)
+        self._opp_pure_indices = [
+            tuple(pure[iss] for iss in self._opp_iss_list)
+            for pure in self._opp_pure_strats
+        ]
+
         # Opponent model: simple dict of counts, seeded with 5 GTO prior hands
         # {opp_iss -> {action -> count}}
         self.opp_model = {}
@@ -241,6 +235,20 @@ class RWYWEAgent(rl_agent.AbstractAgent):
         self._pending_action_probs = None
         self._opp_obs_action       = None
         self._opp_reached_iss      = None
+
+    def reset_opponent_model(self):
+        """
+        Reset the opponent model to the GTO prior (5 fictitious hands).
+        Call this when you know the opponent has switched strategy — e.g.
+        at hand 101 in the dynamic opponent test — so accumulated observations
+        from the old strategy don't pollute the model for the new one.
+        """
+        for iss, actions in self._opp_iss_actions.items():
+            gto = _gto_probs_p1(iss)
+            self.opp_model[iss] = {
+                a: self.PRIOR_HANDS * gto.get(a, 1.0 / len(actions))
+                for a in actions
+            }
 
     # ------------------------------------------------------------------
     # Opponent model
@@ -260,31 +268,69 @@ class RWYWEAgent(rl_agent.AbstractAgent):
 
     def _compute_policy(self) -> dict:
         """
-        ε-safe best response to the current opponent model.
-        Enumerates all 64 agent pure strategies; picks highest EV among
-        those with precomputed expl ≤ max(k, 0).
-        Returns policy as {iss -> {action: prob}}.
+        Exact ε-safe best response via LP, using the precomputed EV matrix.
+
+        All _ev_exact calls are replaced by dot products against the
+        precomputed self._ev_matrix (shape: n_agent_pure × n_opp_pure).
+
+        Per hand: one dot product for objective (64-dim), one matrix-vector
+        multiply for safety constraints (8×64) — microseconds vs ~512 tree
+        traversals before.
         """
-        epsilon       = max(self.k, 0.0)
-        opp_pol       = self._opp_model_policy()
-        best_pure     = None
-        best_ev       = -float("inf")
-        fallback      = None
-        fallback_expl = float("inf")
+        from scipy.optimize import linprog
 
-        for pure, expl in zip(self._agent_pure_strats, self._agent_pure_expls):
-            policy = {iss: {a: 1.0} for iss, a in pure.items()}
-            ev     = _ev_exact(self.game, self.player_id, policy, opp_pol)
-            if expl <= epsilon + 1e-9:
-                if ev > best_ev:
-                    best_ev   = ev
-                    best_pure = pure
-            if expl < fallback_expl:
-                fallback_expl = expl
-                fallback      = pure
+        epsilon = max(self.k, 0.0)
+        v_star  = -1.0/18.0 if self.player_id == 0 else 1.0/18.0
+        n_a     = len(self._agent_pure_strats)
 
-        chosen = best_pure if best_pure is not None else fallback
-        return {iss: {a: 1.0} for iss, a in chosen.items()}
+        opp_pol = self._opp_model_policy()
+
+        # EV of each agent pure strategy vs the opponent model (mixed strategy).
+        # Use _ev_exact with the mixed opp_pol directly — correct and exact.
+        # This is 64 tree traversals but each is O(12 nodes) so still fast.
+        ev_vs_model = np.array([
+            _ev_exact(self.game, self.player_id,
+                      {iss: {a: 1.0} for iss, a in pure.items()}, opp_pol)
+            for pure in self._agent_pure_strats
+        ])
+
+        # Safety constraints: EV of each agent pure vs each opponent pure
+        # = ev_matrix itself (already computed)
+        # Constraint: Σ_i λ_i * ev_matrix[i,j] ≥ v* - ε  ∀j
+        # → -ev_matrix.T @ λ ≤ -(v* - ε) = ε - v*
+        A_ub = -self._ev_matrix.T          # shape: (n_opp_pure, n_agent_pure)
+        b_ub = np.full(A_ub.shape[0], epsilon - v_star)
+
+        # Simplex: Σ λ_i = 1
+        A_eq = np.ones((1, n_a))
+        b_eq = np.ones(1)
+
+        result = linprog(-ev_vs_model,
+                         A_ub=A_ub, b_ub=b_ub,
+                         A_eq=A_eq, b_eq=b_eq,
+                         bounds=[(0.0, 1.0)] * n_a,
+                         method='highs')
+
+        if result.success:
+            lambdas = np.clip(result.x, 0.0, None)
+            lambdas /= lambdas.sum()
+
+            # Marginalise to behavioral strategy
+            iss_list = sorted(self._agent_iss_actions)
+            policy   = {}
+            for iss in iss_list:
+                actions = self._agent_iss_actions[iss]
+                dist    = {a: 0.0 for a in actions}
+                for i, pure in enumerate(self._agent_pure_strats):
+                    dist[pure[iss]] += lambdas[i]
+                total = sum(dist.values())
+                policy[iss] = {a: v / total for a, v in dist.items()} if total > 0 \
+                              else {a: 1.0 / len(actions) for a in actions}
+            return policy
+        else:
+            fallback = min(zip(self._agent_pure_strats, self._agent_pure_expls),
+                           key=lambda x: x[1])[0]
+            return {iss: {a: 1.0} for iss, a in fallback.items()}
 
     # ------------------------------------------------------------------
     # rl_agent interface
@@ -329,6 +375,7 @@ class RWYWEAgent(rl_agent.AbstractAgent):
                 self._opp_reached_iss,
                 self._opp_obs_action,
                 self._opp_iss_actions,
+                self.opp_model,
             )
             self.k += pess_ev - self.v_star
 

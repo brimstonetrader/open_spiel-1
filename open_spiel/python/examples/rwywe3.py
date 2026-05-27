@@ -82,7 +82,7 @@ class RWYWEAgent(rl_agent.AbstractAgent):
         self.solver = outcome_sampling_mccfr.OutcomeSamplingSolver(game)
 
         # Pretrain the baseline strategy.
-        for _ in range(1500):
+        for _ in range(10000):
             self.solver.iteration()
 
         # Temporary storage so inform_action can record the opponent action
