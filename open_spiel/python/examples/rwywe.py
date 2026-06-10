@@ -132,27 +132,113 @@ def _mixed_strategy_ev(game, agent_id, agent_policy,
     pess_ev below v* even when the opponent gave us a gift on-path, preventing
     k from growing.
     """
-    v_star = -1.0/18.0 if agent_id == 0 else 1.0/18.0
+    v_star = -1.0 / 18.0 if agent_id == 0 else 1.0 / 18.0
 
-    if opp_reached_iss not in opp_iss_actions:
+    if opp_reached_iss is None:
         return v_star
 
-    # Build τ: observed action at reached ISS, model prediction elsewhere
-    tau_pol = {}
-    for iss, actions in opp_iss_actions.items():
-        if iss == opp_reached_iss:
-            tau_pol[iss] = {opp_obs_action: 1.0}
+    def recurse(s, prob):
+        if s.is_terminal():
+            return prob * s.returns()[agent_id]
+
+        cur = s.current_player()
+
+        total = 0.0
+
+        # ----------------------------------------------------------
+        # chance node
+        # ----------------------------------------------------------
+
+        if cur == pyspiel.PlayerId.CHANCE:
+            for a, p in s.chance_outcomes():
+                s2 = s.clone()
+                s2.apply_action(a)
+
+                total += recurse(s2, prob * p)
+
+            return total
+
+        # ----------------------------------------------------------
+        # our node
+        # ----------------------------------------------------------
+
+        if cur == agent_id:
+            iss  = s.information_state_string(agent_id)
+            dist = agent_policy.get(iss, {})
+            lgl  = s.legal_actions(agent_id)
+
+            norm = sum(dist.get(a, 0.0) for a in lgl)
+
+            if norm <= 0:
+                norm = len(lgl)
+                dist = {a: 1.0 for a in lgl}
+
+            for a in lgl:
+                p = dist.get(a, 0.0) / norm
+
+                if p <= 0:
+                    continue
+
+                s2 = s.clone()
+                s2.apply_action(a)
+
+                total += recurse(s2, prob * p)
+
+            return total
+
+        # ----------------------------------------------------------
+        # opponent node
+        # ----------------------------------------------------------
+
+        opp_id = cur
+        iss    = s.information_state_string(opp_id)
+        lgl    = s.legal_actions(opp_id)
+
+        # ----------------------------------------------------------
+        # reached information set:
+        # force observed action
+        # ----------------------------------------------------------
+
+        if iss == opp_reached_iss and opp_obs_action in lgl:
+
+            if opp_obs_action not in lgl:
+                return 0.0
+
+            s2 = s.clone()
+            s2.apply_action(opp_obs_action)
+
+            return recurse(s2, prob)
+
+        # ----------------------------------------------------------
+        # otherwise:
+        # use opponent model normally
+        # ----------------------------------------------------------
+
+        counts = opp_model.get(iss, {})
+        total_counts = sum(counts.values())
+
+        if total_counts <= 0:
+            probs = {a: 1.0 / len(lgl) for a in lgl}
         else:
-            # Use opponent model counts as probabilities
-            counts = opp_model.get(iss, {})
-            total  = sum(counts.values())
-            if total > 0:
-                tau_pol[iss] = {a: counts.get(a, 0.0) / total for a in actions}
-            else:
-                tau_pol[iss] = {a: 1.0 / len(actions) for a in actions}
+            probs = {
+                a: counts.get(a, 0.0) / total_counts
+                for a in lgl
+            }
 
-    return _ev_exact(game, agent_id, agent_policy, tau_pol)
+        for a in lgl:
+            p = probs.get(a, 0.0)
 
+            if p <= 0:
+                continue
+
+            s2 = s.clone()
+            s2.apply_action(a)
+
+            total += recurse(s2, prob * p)
+
+        return total
+
+    return recurse(game.new_initial_state(), 1.0)
 
 # ---------------------------------------------------------------------------
 # Main agent
@@ -235,6 +321,8 @@ class RWYWEAgent(rl_agent.AbstractAgent):
         self._pending_action_probs = None
         self._opp_obs_action       = None
         self._opp_reached_iss      = None
+        self._pre_opp_state        = None
+        self._post_deal_state      = None
 
     def reset_opponent_model(self):
         """
@@ -342,6 +430,10 @@ class RWYWEAgent(rl_agent.AbstractAgent):
             self._pending_action_probs = self._current_policy.get(
                 state.information_state_string(self.player_id), {}
             )
+            # Save state after cards dealt but before any actions this hand.
+            # This is the right root for ev_from() — captures the actual cards
+            # while still allowing the mixed strategy expectation to be computed.
+            self._post_deal_state = state.clone()
 
         iss  = state.information_state_string(self.player_id)
         dist = self._current_policy.get(iss, {})
@@ -360,6 +452,7 @@ class RWYWEAgent(rl_agent.AbstractAgent):
         if player == self.opp_id:
             self._opp_reached_iss = state.information_state_string(self.opp_id)
             self._opp_obs_action  = action
+            self._pre_opp_state   = state.clone()   # state with actual cards dealt
             self.opp_model[self._opp_reached_iss][action] = \
                 self.opp_model[self._opp_reached_iss].get(action, 0.0) + 1.0
 
@@ -368,15 +461,50 @@ class RWYWEAgent(rl_agent.AbstractAgent):
             return
 
         if (self._opp_obs_action is not None
-                and self._opp_reached_iss is not None):
-            pess_ev = _mixed_strategy_ev(
-                self.game, self.player_id,
-                self._current_policy,
-                self._opp_reached_iss,
-                self._opp_obs_action,
-                self._opp_iss_actions,
-                self.opp_model,
-            )
+                and self._opp_reached_iss is not None
+                and self._post_deal_state is not None):
+
+            # Build τ: observed action on-path, opponent model elsewhere
+            tau_pol = {}
+            for iss, actions in self._opp_iss_actions.items():
+                if iss == self._opp_reached_iss:
+                    tau_pol[iss] = {self._opp_obs_action: 1.0}
+                else:
+                    counts = self.opp_model.get(iss, {})
+                    total  = sum(counts.values())
+                    tau_pol[iss] = {a: counts.get(a, 0.0) / total for a in actions} \
+                                   if total > 0 else {a: 1.0/len(actions) for a in actions}
+
+            # Traverse from the actual pre-opponent state (cards already dealt)
+            # not from game.new_initial_state() — that would average over all deals
+            def ev_from(s, prob):
+                if s.is_terminal():
+                    return prob * s.returns()[self.player_id]
+                cur = s.current_player()
+                total = 0.0
+                if cur == pyspiel.PlayerId.CHANCE:
+                    for a, p in s.chance_outcomes():
+                        s2 = s.clone(); s2.apply_action(a)
+                        total += ev_from(s2, prob * p)
+                elif cur == self.player_id:
+                    iss  = s.information_state_string(self.player_id)
+                    dist = self._current_policy.get(iss, {})
+                    lgl  = s.legal_actions(self.player_id)
+                    norm = sum(dist.get(a, 0.0) for a in lgl) or 1.0
+                    for a in lgl:
+                        s2 = s.clone(); s2.apply_action(a)
+                        total += ev_from(s2, prob * dist.get(a, 0.0) / norm)
+                else:
+                    iss   = s.information_state_string(cur)
+                    entry = tau_pol.get(iss, {})
+                    lgl   = s.legal_actions(cur)
+                    norm  = sum(entry.get(a, 0.0) for a in lgl) or 1.0
+                    for a in lgl:
+                        s2 = s.clone(); s2.apply_action(a)
+                        total += ev_from(s2, prob * entry.get(a, 0.0) / norm)
+                return total
+
+            pess_ev = ev_from(self._post_deal_state, 1.0)
             self.k += pess_ev - self.v_star
 
         # Reset per-hand state
@@ -384,9 +512,13 @@ class RWYWEAgent(rl_agent.AbstractAgent):
         self._pending_action_probs = None
         self._opp_obs_action       = None
         self._opp_reached_iss      = None
+        self._pre_opp_state        = None
+        self._post_deal_state      = None
 
     def restart(self):
         self._current_policy       = None
         self._pending_action_probs = None
         self._opp_obs_action       = None
         self._opp_reached_iss      = None
+        self._pre_opp_state        = None
+        self._post_deal_state      = None

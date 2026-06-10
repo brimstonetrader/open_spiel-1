@@ -28,7 +28,7 @@ from rwywe_exploitabilityvsk import (
 )
 
 NUM_HANDS = 1000
-NUM_RUNS  = 50
+NUM_RUNS  = 10
 
 
 # ---------------------------------------------------------------------------

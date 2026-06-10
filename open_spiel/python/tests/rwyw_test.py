@@ -26,7 +26,7 @@ import matplotlib.ticker as ticker
 from open_spiel.python.examples.rwywe import RWYWEAgent, _ev, _pure_strategies, _all_infosets
 
 ROUND_SIZES = [108, 1080, 1998, 5004, 9990]
-NUM_RUNS    = 5
+NUM_RUNS    = 1
 V_STAR      = -1.0 / 18.0
 
 
@@ -126,54 +126,159 @@ def run_suite(base_seed=None):
 # Plot
 # ---------------------------------------------------------------------------
 
-def plot(round_sizes, mean_expls, std_expls, seed):
+def plot(round_sizes, mean_expls, std_expls, total_winnings_runs, seed):
     BG, PANEL = "#ffffff", "#111827"
     GRID, MUTED, TEXT = "#1e293b", "#64748b", "#000000"
     GREEN = "#34d399"
+    BLUE  = "#60a5fa"
 
-    fig, ax = plt.subplots(figsize=(9, 5), facecolor=BG)
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG)
     ax.set_facecolor(PANEL)
 
-    xs    = list(range(len(round_sizes)))
+    xs = np.arange(len(round_sizes))
+
     means = np.array(mean_expls)
     stds  = np.array(std_expls)
 
-    # Bar chart
-    bars = ax.bar(xs, means, color=GREEN, alpha=0.7, width=0.5, zorder=3)
+    # ------------------------------------------------------------------
+    # Exploitability bars + error bars
+    # ------------------------------------------------------------------
+    ax.bar(
+        xs - 0.18,
+        means,
+        width=0.32,
+        color=GREEN,
+        alpha=0.7,
+        zorder=3,
+        label="Mean exploitability",
+    )
 
-    # Error bars
-    ax.errorbar(xs, means, yerr=stds, fmt='none',
-                color=GREEN, capsize=6, capthick=1.5, elinewidth=1.5, zorder=4)
+    ax.errorbar(
+        xs - 0.18,
+        means,
+        yerr=stds,
+        fmt='none',
+        color=GREEN,
+        capsize=6,
+        capthick=1.5,
+        elinewidth=1.5,
+        zorder=4,
+    )
 
-    # Value labels on bars
+    # Labels
     for i, (m, s) in enumerate(zip(means, stds)):
-        ax.text(i, m + s + 0.001, f"{m:.4f}",
-                ha='center', va='bottom', color=TEXT, fontsize=8,
-                fontfamily='monospace')
+        ax.text(
+            xs[i] - 0.18,
+            m + s + 0.001,
+            f"{m:.4f}",
+            ha='center',
+            va='bottom',
+            color=TEXT,
+            fontsize=8,
+            fontfamily='monospace',
+        )
 
-    # Zero line
+    # ------------------------------------------------------------------
+    # Total winnings box plots
+    # total_winnings_runs should be:
+    #   list[len(round_sizes)] of lists[len(NUM_RUNS)]
+    # ------------------------------------------------------------------
+    box_positions = xs + 0.18
+
+    bp = ax.boxplot(
+        total_winnings_runs,
+        positions=box_positions,
+        widths=0.28,
+        patch_artist=True,
+        manage_ticks=False,
+        zorder=5,
+    )
+
+    for box in bp['boxes']:
+        box.set(facecolor=BLUE, alpha=0.45, edgecolor=BLUE)
+
+    for item in ['whiskers', 'caps', 'medians']:
+        for artist in bp[item]:
+            artist.set(color=BLUE, linewidth=1.5)
+
+    for flier in bp['fliers']:
+        flier.set(
+            marker='o',
+            markersize=4,
+            markerfacecolor=BLUE,
+            markeredgecolor=BLUE,
+            alpha=0.5,
+        )
+
+    # ------------------------------------------------------------------
+    # Expected winnings baseline:
+    # zero corresponds to expected value = (-1/18 * num_runs)
+    # ------------------------------------------------------------------
+    expected_lines = [(-1.0 / 18.0) * T for T in round_sizes]
+
+    ax.plot(
+        box_positions,
+        expected_lines,
+        linestyle='--',
+        linewidth=1.4,
+        color=BLUE,
+        alpha=0.9,
+        label=r"Expected winnings  $-\frac{1}{18}T$",
+        zorder=6,
+    )
+
+    # ------------------------------------------------------------------
+    # Axes / styling
+    # ------------------------------------------------------------------
     ax.axhline(0, color=TEXT, lw=0.6, alpha=0.4, zorder=2)
 
     ax.set_xticks(xs)
-    ax.set_xticklabels([f"T={T:,}" for T in round_sizes], color=MUTED, fontsize=9)
-    ax.set_xlabel("Hands per match (T)", color=MUTED, fontsize=10, labelpad=6)
-    ax.set_ylabel("Mean exploitability  expl(π_t)", color=GREEN, fontsize=10)
-    ax.tick_params(axis="y", colors=GREEN, labelsize=8)
-    ax.grid(True, axis='y', color=GRID, lw=0.5, zorder=0)
-    for sp in ax.spines.values(): sp.set_edgecolor(GRID)
-
-    ax.set_title(
-        f"RWYW Expected Exploitability vs Match Length  ·  Kuhn Poker\n"
-        f"Dynamic best response opponent  ·  {NUM_RUNS} runs per T  ·  seed {seed}",
-        color=TEXT, fontsize=11, fontweight="bold", pad=10,
+    ax.set_xticklabels(
+        [f"T={T:,}" for T in round_sizes],
+        color=MUTED,
+        fontsize=9,
     )
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "rwyw_exploitability.png")
+    ax.set_xlabel(
+        "Hands per match (T)",
+        color=MUTED,
+        fontsize=10,
+        labelpad=6,
+    )
+
+    ax.set_ylabel(
+        "Exploitability / Total winnings",
+        color=TEXT,
+        fontsize=10,
+    )
+
+    ax.tick_params(axis="y", colors=TEXT, labelsize=8)
+
+    ax.grid(True, axis='y', color=GRID, lw=0.5, zorder=0)
+
+    for sp in ax.spines.values():
+        sp.set_edgecolor(GRID)
+
+    ax.legend(facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+
+    ax.set_title(
+        f"RWYW Exploitability + Total Winnings  ·  Kuhn Poker\n"
+        f"Dynamic best response opponent  ·  {NUM_RUNS} runs per T  ·  seed {seed}",
+        color=TEXT,
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
+
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "rwyw_exploitability.png",
+    )
+
     plt.tight_layout()
     plt.savefig(path, dpi=160, bbox_inches="tight", facecolor=BG)
-    print(f"Saved → {path}")
 
+    print(f"Saved → {path}")
 
 if __name__ == "__main__":
     run_suite()
